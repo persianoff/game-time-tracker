@@ -136,7 +136,10 @@ impl Parser<'_> {
         } else {
             let start = self.pos;
             while let Some(c) = self.peek() {
-                if c.is_ascii_whitespace() || matches!(c, b'"' | b'{' | b'}') {
+                if c.is_ascii_whitespace()
+                    || matches!(c, b'"' | b'{' | b'}')
+                    || self.cond_at(self.pos)
+                {
                     break;
                 }
                 self.pos += 1;
@@ -148,10 +151,17 @@ impl Parser<'_> {
         }
     }
 
+    /// True if a conditional tag (`[$...]` or `[!$...]`) starts at `i`.
+    fn cond_at(&self, i: usize) -> bool {
+        self.b.get(i) == Some(&b'[')
+            && (self.b.get(i + 1) == Some(&b'$')
+                || (self.b.get(i + 1) == Some(&b'!') && self.b.get(i + 2) == Some(&b'$')))
+    }
+
     /// Skip an optional `[$COND]` tag.
     fn skip_cond(&mut self) -> Result<(), VdfError> {
         self.skip_ws();
-        if self.peek() == Some(b'[') {
+        if self.cond_at(self.pos) {
             while let Some(c) = self.peek() {
                 if c == b'\n' {
                     return self.err("unterminated conditional");
@@ -269,6 +279,24 @@ mod tests {
         assert_eq!(e.line, 1);
         let e = parse("\"a\"\n").unwrap_err();
         assert_eq!(e.line, 2);
+    }
+
+    #[test]
+    fn conditional_tags_only_dollar() {
+        let v = parse("k[$WIN32] v[!$X360]\nk2 [notcond]").unwrap();
+        assert_eq!(v.get("k").unwrap().as_str(), Some("v"));
+        assert_eq!(v.get("k2").unwrap().as_str(), Some("[notcond]"));
+    }
+
+    #[test]
+    fn edge_cases() {
+        assert_eq!(parse("").unwrap(), Vdf::Obj(vec![]));
+        assert!(parse("\"a\" \"b\" // end").is_ok());
+        assert!(parse("\"a\" \"b\\").is_err());
+        let v = parse(r#""a" "x\qy""#).unwrap();
+        assert_eq!(v.get("a").unwrap().as_str(), Some("x\\qy"));
+        let v = parse("\"имя\" \"Игра 日本\"").unwrap();
+        assert_eq!(v.get("имя").unwrap().as_str(), Some("Игра 日本"));
     }
 
     #[test]
