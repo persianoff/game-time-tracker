@@ -52,11 +52,12 @@ pub struct Game {
 // ------------------------------------------------------------ path hygiene
 
 /// Normalise `raw` and reject unsafe or degenerate install directories:
-/// the path must be absolute, have at least `min_depth` normal components
-/// below the drive (or share) root, and must not be a broad system folder
+/// the path must be absolute, have at least one normal component
+/// below the drive (or share) root (for non-manual sources that component
+/// must not be a library root such as `Games`), and must not be a broad system folder
 /// (`C:\Windows\...`, `C:\Program Files`, `C:\Program Files (x86)`,
 /// `C:\ProgramData`, `C:\Users`, `C:\Users\<name>`).
-fn clean_dir(raw: &Path, min_depth: usize) -> Option<PathBuf> {
+fn clean_dir(raw: &Path, manual: bool) -> Option<PathBuf> {
     let p = normalize_path(raw);
     if !p.is_absolute() {
         return None;
@@ -76,7 +77,12 @@ fn clean_dir(raw: &Path, min_depth: usize) -> Option<PathBuf> {
             _ => return None, // `..`, `.`
         }
     }
-    if normals.len() < min_depth.max(1) {
+    if normals.is_empty() {
+        return None;
+    }
+    // A single-component dir that is a well-known library root would swallow
+    // every game in it. Manual entries are the user's explicit choice.
+    if !manual && normals.len() == 1 && LIBRARY_ROOTS.contains(&normals[0].as_str()) {
         return None;
     }
     if disk {
@@ -100,8 +106,8 @@ fn last_component(p: &Path) -> Option<String> {
     })
 }
 
-fn make_game(source: Source, name: Option<&str>, dir: &Path, min_depth: usize) -> Option<Game> {
-    let install_dir = clean_dir(dir, min_depth)?;
+fn make_game(source: Source, name: Option<&str>, dir: &Path) -> Option<Game> {
+    let install_dir = clean_dir(dir, source == Source::Manual)?;
     let name = name
         .map(str::trim)
         .filter(|n| !n.is_empty())
@@ -114,7 +120,19 @@ fn make_game(source: Source, name: Option<&str>, dir: &Path, min_depth: usize) -
     })
 }
 
-const AUTO_DEPTH: usize = 2;
+const LIBRARY_ROOTS: &[&str] = &[
+    "games",
+    "epic games",
+    "gog games",
+    "gog galaxy",
+    "steamlibrary",
+    "steam",
+    "xboxgames",
+    "ea games",
+    "origin games",
+    "ubisoft",
+    "ubisoft game launcher",
+];
 
 // -------------------------------------------------------------------- Steam
 
@@ -126,7 +144,7 @@ fn scan_steam() -> Vec<Game> {
     };
     steam::scan(Path::new(&root))
         .into_iter()
-        .filter_map(|g| make_game(Source::Steam, Some(&g.name), &g.install_dir, AUTO_DEPTH))
+        .filter_map(|g| make_game(Source::Steam, Some(&g.name), &g.install_dir))
         .collect()
 }
 
@@ -142,7 +160,7 @@ struct EpicManifest {
     #[serde(rename = "bIsIncompleteInstall")]
     incomplete: bool,
     #[serde(rename = "AppCategories")]
-    categories: Vec<String>,
+    categories: Option<Vec<String>>,
     #[serde(rename = "AppName")]
     app_name: Option<String>,
     #[serde(rename = "MainGameAppName")]
@@ -150,13 +168,20 @@ struct EpicManifest {
 }
 
 /// Parse one `*.item` manifest. Lenient: unknown fields are ignored, and a
-/// missing `AppCategories` is accepted.
+/// missing or null `AppCategories` is accepted. Engine/plugin/addon entries
+/// are rejected.
 pub fn parse_epic_manifest(text: &str) -> Option<Game> {
     let m: EpicManifest = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
     if m.incomplete {
         return None;
     }
-    if !m.categories.is_empty() && !m.categories.iter().any(|c| c.eq_ignore_ascii_case("games")) {
+    const NON_GAME: &[&str] = &["plugins", "plugins/engine", "engines", "addons"];
+    let non_game = m
+        .categories
+        .iter()
+        .flatten()
+        .any(|c| NON_GAME.iter().any(|n| c.eq_ignore_ascii_case(n)));
+    if non_game {
         return None;
     }
     // DLC manifests point at their base game's folder.
@@ -166,12 +191,7 @@ pub fn parse_epic_manifest(text: &str) -> Option<Game> {
         }
     }
     let loc = m.install_location.as_deref().filter(|l| !l.is_empty())?;
-    make_game(
-        Source::Epic,
-        m.display_name.as_deref(),
-        Path::new(loc),
-        AUTO_DEPTH,
-    )
+    make_game(Source::Epic, m.display_name.as_deref(), Path::new(loc))
 }
 
 fn scan_epic() -> Vec<Game> {
@@ -209,24 +229,19 @@ fn scan_epic_dir(dir: &Path) -> Vec<Game> {
 /// GOG: values `gameName` and `path` of `...\GOG.com\Games\<id>`.
 pub fn gog_game(get: impl Fn(&str) -> Option<String>) -> Option<Game> {
     let path = get("path")?;
-    make_game(
-        Source::Gog,
-        get("gameName").as_deref(),
-        Path::new(&path),
-        AUTO_DEPTH,
-    )
+    make_game(Source::Gog, get("gameName").as_deref(), Path::new(&path))
 }
 
 /// Ubisoft: value `InstallDir`; the name is the last folder component.
 pub fn ubisoft_game(get: impl Fn(&str) -> Option<String>) -> Option<Game> {
     let dir = get("InstallDir")?;
-    make_game(Source::Ubisoft, None, Path::new(&dir), AUTO_DEPTH)
+    make_game(Source::Ubisoft, None, Path::new(&dir))
 }
 
 /// EA: value `Install Dir`; the name is the registry subkey name.
 pub fn ea_game(key_name: &str, get: impl Fn(&str) -> Option<String>) -> Option<Game> {
     let dir = get("Install Dir")?;
-    make_game(Source::Ea, Some(key_name), Path::new(&dir), AUTO_DEPTH)
+    make_game(Source::Ea, Some(key_name), Path::new(&dir))
 }
 
 fn scan_reg_subkeys(
@@ -258,16 +273,16 @@ fn scan_ubisoft() -> Vec<Game> {
 }
 
 fn scan_ea() -> Vec<Game> {
-    let mut out = scan_reg_subkeys("SOFTWARE\\WOW6432Node\\Electronic Arts", |n, get| {
-        ea_game(n, get)
-    });
-    out.extend(scan_reg_subkeys(
-        "SOFTWARE\\WOW6432Node\\EA Games",
-        |n, get| ea_game(n, get),
-    ));
-    out
+    let mut out = Vec::new();
+    for root in ["SOFTWARE\\WOW6432Node", "SOFTWARE"] {
+        for name in ["Electronic Arts", "EA Games"] {
+            out.extend(scan_reg_subkeys(&format!("{root}\\{name}"), |n, get| {
+                ea_game(n, get)
+            }));
+        }
+    }
+    out // duplicates (same install dir) are removed by GameDb::new
 }
-
 // --------------------------------------------------------------------- Xbox
 
 /// Games under one `<drive>:\XboxGames` folder: each subfolder that has a
@@ -283,7 +298,7 @@ fn xbox_games_in(xbox_root: &Path) -> Vec<Game> {
             continue;
         }
         let name = e.file_name().to_string_lossy().into_owned();
-        if let Some(g) = make_game(Source::Xbox, Some(&name), &dir, AUTO_DEPTH) {
+        if let Some(g) = make_game(Source::Xbox, Some(&name), &dir) {
             out.push(g);
         }
     }
@@ -320,7 +335,7 @@ fn scan_xbox() -> Vec<Game> {
 fn manual_games(cfg: &Config) -> Vec<Game> {
     cfg.extra_games
         .iter()
-        .filter_map(|(path, name)| make_game(Source::Manual, Some(name), Path::new(path), 1))
+        .filter_map(|(path, name)| make_game(Source::Manual, Some(name), Path::new(path)))
         .collect()
 }
 
@@ -336,6 +351,8 @@ pub struct GameDb {
     /// Sorted by prefix length descending, manual first on ties.
     entries: Vec<Entry>,
     ignore: Vec<String>,
+    /// Lowercase bare file names from `ignore`.
+    ignore_names: Vec<String>,
 }
 
 fn lower_key(p: &Path) -> String {
@@ -345,7 +362,9 @@ fn lower_key(p: &Path) -> String {
 /// True if `prefix` is a prefix of `path` on a component boundary.
 fn has_prefix(path: &str, prefix: &str) -> bool {
     path.starts_with(prefix)
-        && (path.len() == prefix.len() || path.as_bytes()[prefix.len()] == b'\\')
+        && (path.len() == prefix.len()
+            || prefix.ends_with('\\')
+            || path.as_bytes()[prefix.len()] == b'\\')
 }
 
 const EXCLUDED_EXACT: &[&str] = &[
@@ -359,6 +378,13 @@ const EXCLUDED_EXACT: &[&str] = &[
     "ubisoftconnect.exe",
     "eadesktop.exe",
     "eabackgroundservice.exe",
+    "ealauncher.exe",
+    "eacefsubprocess.exe",
+    "origin.exe",
+    "originwebhelperservice.exe",
+    "originclientservice.exe",
+    "originthinsetupinternal.exe",
+    "originer.exe",
     "dxsetup.exe",
     "lockapp.exe",
     "explorer.exe",
@@ -369,7 +395,6 @@ const EXCLUDED_EXACT: &[&str] = &[
 
 const EXCLUDED_PREFIX: &[&str] = &[
     "galaxyclient",
-    "origin",
     "unitycrashhandler",
     "crashreport",
     "crashsender",
@@ -390,11 +415,17 @@ fn is_excluded_name(name: &str) -> bool {
 
 impl GameDb {
     pub fn new(games: Vec<Game>, ignore: &[String]) -> GameDb {
-        let ignore: Vec<String> = ignore
-            .iter()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| lower_key(Path::new(s.trim())))
-            .collect();
+        // Entries without a path separator are bare file names.
+        let mut ignore_names = Vec::new();
+        let mut paths = Vec::new();
+        for s in ignore.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if s.contains(['\\', '/']) {
+                paths.push(lower_key(Path::new(s)));
+            } else {
+                ignore_names.push(s.to_lowercase());
+            }
+        }
+        let ignore = paths;
 
         // Manual entries first, so they win on dedup and on equal length.
         let mut all: Vec<(String, Game)> = games
@@ -446,6 +477,7 @@ impl GameDb {
             games,
             entries,
             ignore,
+            ignore_names,
         }
     }
 
@@ -454,15 +486,18 @@ impl GameDb {
         &self.games
     }
 
-    /// Map an exe path to its game. Allocates the normalised exe path plus
-    /// its lowercase form.
+    /// Map an exe path to its game. Allocation: the normalised `PathBuf`
+    /// (plus its lossy `String` when non-UTF-8-clean) and the lowercase
+    /// `String`; matching itself allocates nothing.
     pub fn match_exe(&self, exe: &Path) -> Option<&Game> {
         let lower = lower_key(exe);
         let name = lower.rsplit('\\').next().unwrap_or(&lower);
         if is_excluded_name(name) {
             return None;
         }
-        if self.ignore.iter().any(|i| has_prefix(&lower, i)) {
+        if self.ignore_names.iter().any(|n| n == name)
+            || self.ignore.iter().any(|i| has_prefix(&lower, i))
+        {
             return None;
         }
         self.entries
@@ -529,8 +564,15 @@ mod tests {
             "\"bIsIncompleteInstall\": true",
         );
         assert!(parse_epic_manifest(&incomplete).is_none());
-        let engine = EPIC.replace("\"games\"", "\"engine\"");
-        assert!(parse_epic_manifest(&engine).is_none());
+        for cat in ["plugins", "plugins/engine", "engines", "addons"] {
+            let bad = EPIC.replace("\"games\"", &format!("\"{cat}\""));
+            assert!(parse_epic_manifest(&bad).is_none(), "{cat}");
+        }
+        // No "games" category is fine now.
+        let other = EPIC.replace("\"games\"", "\"applications2\"");
+        assert!(parse_epic_manifest(&other).is_some());
+        let null = EPIC.replace("[\"public\", \"games\", \"applications\"]", "null");
+        assert!(parse_epic_manifest(&null).is_some());
         let dlc = EPIC.replace(
             "\"MainGameAppName\": \"abc123\"",
             "\"MainGameAppName\": \"zzz\"",
@@ -605,16 +647,16 @@ mod tests {
             "",
             "C:\\a\\..\\b",
         ] {
-            assert!(clean_dir(Path::new(d), AUTO_DEPTH).is_none(), "{d}");
+            assert!(clean_dir(Path::new(d), false).is_none(), "{d}");
         }
-        assert!(clean_dir(Path::new("C:\\Program Files\\Foo"), AUTO_DEPTH).is_some());
-        assert!(clean_dir(Path::new("D:\\Games\\Foo"), AUTO_DEPTH).is_some());
-        assert!(clean_dir(Path::new("\\\\srv\\share\\Games\\Foo"), AUTO_DEPTH).is_some());
-        assert!(clean_dir(Path::new("\\\\?\\D:\\Games\\Foo"), AUTO_DEPTH).is_some());
+        assert!(clean_dir(Path::new("C:\\Program Files\\Foo"), false).is_some());
+        assert!(clean_dir(Path::new("D:\\Games\\Foo"), false).is_some());
+        assert!(clean_dir(Path::new("\\\\srv\\share\\Games\\Foo"), false).is_some());
+        assert!(clean_dir(Path::new("\\\\?\\D:\\Games\\Foo"), false).is_some());
         // Manual: one level is fine, but never a broad folder.
-        assert!(clean_dir(Path::new("D:\\Foo"), 1).is_some());
-        assert!(clean_dir(Path::new("C:\\Program Files"), 1).is_none());
-        assert!(clean_dir(Path::new("C:\\"), 1).is_none());
+        assert!(clean_dir(Path::new("D:\\Foo"), true).is_some());
+        assert!(clean_dir(Path::new("C:\\Program Files"), true).is_none());
+        assert!(clean_dir(Path::new("C:\\"), true).is_none());
     }
 
     fn sample_db() -> GameDb {
@@ -676,6 +718,68 @@ mod tests {
         let db = GameDb::new(vec![g("Solo", Source::Manual, "D:\\Apps\\solo.exe")], &[]);
         assert_eq!(m(&db, "D:\\Apps\\solo.exe").as_deref(), Some("Solo"));
         assert_eq!(m(&db, "D:\\Apps\\other.exe"), None);
+    }
+
+    #[test]
+    fn epic_one_below_root() {
+        let g =
+            parse_epic_manifest(r#"{"DisplayName":"Fortnite","InstallLocation":"D:\\Fortnite"}"#)
+                .unwrap();
+        assert_eq!(g.install_dir, PathBuf::from("D:\\Fortnite"));
+        assert!(
+            parse_epic_manifest(r#"{"DisplayName":"X","InstallLocation":"D:\\Games"}"#).is_none()
+        );
+        let vals = HashMap::from([("InstallDir", "D:/Far Cry 5/")]);
+        assert!(ubisoft_game(map_get(&vals)).is_some());
+        let vals = HashMap::from([("path", "D:\\The Witcher 3"), ("gameName", "W3")]);
+        assert!(gog_game(map_get(&vals)).is_some());
+    }
+
+    #[test]
+    fn library_roots_auto_vs_manual() {
+        for d in [
+            "D:\\Games",
+            "C:\\Games",
+            "D:\\SteamLibrary",
+            "D:\\Epic Games",
+            "D:\\XboxGames",
+        ] {
+            assert!(clean_dir(Path::new(d), false).is_none(), "{d}");
+            assert!(clean_dir(Path::new(d), true).is_some(), "{d}");
+        }
+        assert!(clean_dir(Path::new("D:\\Games\\Foo"), false).is_some());
+    }
+
+    #[test]
+    fn match_ignore_names_and_drive() {
+        let db = GameDb::new(
+            vec![
+                g("Foo", Source::Steam, "C:\\Games\\Foo"),
+                g("Bar", Source::Gog, "D:\\Bar"),
+            ],
+            &["Foo.EXE".to_string(), "D:\\".to_string()],
+        );
+        assert_eq!(m(&db, "C:\\Games\\Foo\\foo.exe"), None);
+        assert_eq!(m(&db, "C:\\Games\\Foo\\other.exe").as_deref(), Some("Foo"));
+        assert_eq!(m(&db, "D:\\Bar\\a.exe"), None);
+        assert!(db.games().iter().all(|g| g.name != "Bar"));
+    }
+
+    #[test]
+    fn ea_exclusions_and_origin_exact() {
+        let db = GameDb::new(vec![g("Foo", Source::Steam, "C:\\Games\\Foo")], &[]);
+        for e in [
+            "EALauncher.exe",
+            "EACefSubProcess.exe",
+            "OriginThinSetupInternal.exe",
+            "Originer.exe",
+        ] {
+            assert_eq!(m(&db, &format!("C:\\Games\\Foo\\{e}")), None, "{e}");
+        }
+        assert_eq!(
+            m(&db, "C:\\Games\\Foo\\OriginQuest.exe").as_deref(),
+            Some("Foo")
+        );
     }
 
     #[test]
