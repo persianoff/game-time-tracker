@@ -16,7 +16,8 @@ name = "gametime-tracker"
 path = "src/tracker_bin.rs"
 
 [dependencies]
-windows-sys = "0.61"
+# 0.59: prebuilt GNU import libs; 0.61+ needs dlltool+as on windows-gnu
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

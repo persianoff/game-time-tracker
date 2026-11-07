@@ -36,9 +36,13 @@ impl Default for Config {
 
 /// `%APPDATA%\GameTime`, created if missing.
 pub fn data_dir() -> io::Result<PathBuf> {
+    // An empty or relative %APPDATA% is treated as unset.
     let appdata = std::env::var_os("APPDATA")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "APPDATA is not set"))?;
-    let dir = PathBuf::from(appdata).join("GameTime");
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(crate::win32::roaming_appdata)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no roaming AppData folder"))?;
+    let dir = appdata.join("GameTime");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
