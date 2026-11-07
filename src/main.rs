@@ -1,0 +1,39 @@
+use std::process::ExitCode;
+
+const USAGE: &str = "Usage: gametime <command>
+
+Commands:
+  scan         Scan for installed games
+  status       Show tracker status
+  export       Export data
+  autostart    Manage autostart
+  stop         Stop the tracker
+  run [--verbose]
+               Run the tracker in the foreground
+  --help       Show this help";
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("scan" | "status" | "export" | "autostart" | "stop") => {
+            println!("not implemented yet");
+            ExitCode::SUCCESS
+        }
+        Some("run") => {
+            if args[1..].iter().any(|a| a != "--verbose") {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            println!("not implemented yet");
+            ExitCode::SUCCESS
+        }
+        Some("--help" | "-h" | "help") | None => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Some(other) => {
+            eprintln!("unknown command: {other}\n\n{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
