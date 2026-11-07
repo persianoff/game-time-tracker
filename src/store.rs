@@ -12,8 +12,11 @@ use std::path::{Path, PathBuf};
 
 const SESSIONS_FILE: &str = "sessions.jsonl";
 const CHECKPOINT_FILE: &str = "current.json";
-const CHECKPOINT_BAD: &str = "current.json.bad";
 
+/// One closed (or checkpointed) session.
+///
+/// Any field added in the future MUST use `#[serde(default)]` so that existing
+/// log lines and checkpoints keep parsing.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct SessionRecord {
     pub game: String,
@@ -27,9 +30,10 @@ pub struct SessionRecord {
 /// Write `bytes` to `<path>.tmp`, fsync, then rename over `path`.
 /// The temp file is removed on error.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
+    // Unique per process so concurrent writers never share a temp file.
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(name);
     let res = (|| {
         let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -43,6 +47,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
     res
 }
+
+/// Failure of [`Store::close_session`], telling the two steps apart.
+#[derive(Debug)]
+pub enum CloseError {
+    /// The append failed: nothing was written, retrying is safe.
+    Append(io::Error),
+    /// The record IS in the log but the checkpoint could not be removed. Do NOT
+    /// retry `append`; retry `clear_checkpoint` (or let `recover` handle it).
+    Clear(io::Error),
+}
+
+impl std::fmt::Display for CloseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CloseError::Append(e) => write!(f, "append failed: {e}"),
+            CloseError::Clear(e) => write!(f, "clear checkpoint failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CloseError {}
 
 pub struct Store {
     dir: PathBuf,
@@ -104,9 +129,13 @@ impl Store {
     /// Append the closed session, THEN clear the checkpoint. If the order were
     /// reversed, a crash in between would lose the session; this way the worst
     /// case is a duplicate, which recovery and loading de-duplicate.
-    pub fn close_session(&self, rec: &SessionRecord) -> io::Result<()> {
-        self.append(rec)?;
-        self.clear_checkpoint()
+    ///
+    /// `append` and `clear_checkpoint` are also public for callers that want to
+    /// handle the steps separately. Never retry `append` after
+    /// [`CloseError::Clear`].
+    pub fn close_session(&self, rec: &SessionRecord) -> Result<(), CloseError> {
+        self.append(rec).map_err(CloseError::Append)?;
+        self.clear_checkpoint().map_err(CloseError::Clear)
     }
 
     pub fn load_checkpoint(&self) -> Option<SessionRecord> {
@@ -114,36 +143,108 @@ impl Store {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Startup recovery of a leftover checkpoint. Returns the recovered record
-    /// if it was appended. A checkpoint already present in the log (crash
-    /// between append and clear) is not appended again. A corrupt checkpoint is
-    /// renamed to `current.json.bad` and `Ok(None)` is returned.
-    pub fn recover(&self) -> io::Result<Option<SessionRecord>> {
-        let path = self.checkpoint_path();
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
+    /// Startup recovery of leftover checkpoints. Returns the records that were
+    /// appended to the log, in processing order (pending files first).
+    ///
+    /// - A record already in the log with the same `(game, start_utc)` and an
+    ///   `end_utc` at least as large is not appended again (crash between
+    ///   append and clear); one with a larger `end_utc` is appended and
+    ///   `load_all` keeps the longer one.
+    /// - An unparseable checkpoint is renamed to `*.bad` and ignored.
+    /// - If `current.json` cannot be read or appended, it is renamed aside to
+    ///   `current.<utc_now>.pending.json` so a new checkpoint can never destroy
+    ///   it; every `recover` call retries all `current.*.pending.json` files
+    ///   and deletes each after success.
+    ///
+    /// Any failure is returned as `Err` after all work was attempted. If even
+    /// the rename-aside fails, `current.json` is still in place: the caller must
+    /// NOT call `write_checkpoint` until `recover` succeeds.
+    pub fn recover(&self) -> io::Result<Vec<SessionRecord>> {
+        let mut recovered = Vec::new();
+        let mut first_err: Option<io::Error> = None;
+        let mut note = |e: io::Error| {
+            first_err.get_or_insert(e);
         };
-        let rec: SessionRecord = match serde_json::from_slice(&bytes) {
-            Ok(r) => r,
-            Err(_) => {
-                let bad = self.dir.join(CHECKPOINT_BAD);
-                let _ = fs::remove_file(&bad);
-                fs::rename(&path, &bad)?;
-                return Ok(None);
+
+        let mut pending = Vec::new();
+        for entry in fs::read_dir(&self.dir)?.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("current.") && name.ends_with(".pending.json") {
+                pending.push(entry.path());
             }
-        };
-        let (all, _) = self.load_all_with_stats()?;
-        let dup = all
-            .iter()
-            .any(|r| r.game == rec.game && r.start_utc == rec.start_utc);
-        if dup {
-            self.clear_checkpoint()?;
-            return Ok(None);
         }
-        self.close_session(&rec)?;
-        Ok(Some(rec))
+        pending.sort();
+
+        let mut log = self.load_all_with_stats()?.0;
+        for path in pending {
+            match self.recover_file(&path, &mut log) {
+                Ok(Some(r)) => recovered.push(r),
+                Ok(None) => {}
+                Err(e) => note(e),
+            }
+        }
+
+        let path = self.checkpoint_path();
+        match self.recover_file(&path, &mut log) {
+            Ok(Some(r)) => recovered.push(r),
+            Ok(None) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                // Keep the crashed session safe from the next write_checkpoint.
+                if let Err(re) = self.set_aside(&path) {
+                    note(re);
+                }
+                note(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(recovered),
+        }
+    }
+
+    /// Process one checkpoint-like file. Deletes it on success; a parse failure
+    /// renames it to `<name>.bad` and returns `Ok(None)`.
+    fn recover_file(
+        &self,
+        path: &Path,
+        log: &mut Vec<SessionRecord>,
+    ) -> io::Result<Option<SessionRecord>> {
+        let bytes = fs::read(path)?;
+        let Ok(rec) = serde_json::from_slice::<SessionRecord>(&bytes) else {
+            let mut bad = path.as_os_str().to_owned();
+            bad.push(".bad");
+            let bad = PathBuf::from(bad);
+            let _ = fs::remove_file(&bad);
+            fs::rename(path, &bad)?;
+            return Ok(None);
+        };
+        let have = log
+            .iter()
+            .filter(|r| r.game == rec.game && r.start_utc == rec.start_utc)
+            .map(|r| r.end_utc)
+            .max();
+        let append = have.is_none_or(|e| rec.end_utc > e);
+        if append {
+            self.append(&rec)?;
+            log.push(rec.clone());
+        }
+        fs::remove_file(path)?;
+        Ok(append.then_some(rec))
+    }
+
+    fn set_aside(&self, path: &Path) -> io::Result<()> {
+        let mut now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        loop {
+            let to = self.dir.join(format!("current.{now}.pending.json"));
+            if !to.exists() {
+                return fs::rename(path, to);
+            }
+            now += 1;
+        }
     }
 
     pub fn load_all(&self) -> io::Result<Vec<SessionRecord>> {
@@ -220,6 +321,22 @@ mod tests {
             end_utc: end,
             active_s: end - start,
         }
+    }
+
+    fn tmp_files(dir: &Path) -> bool {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+    }
+
+    fn pending_files(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().ends_with(".pending.json"))
+            .collect()
     }
 
     fn lines(store: &Store) -> usize {
@@ -300,10 +417,10 @@ mod tests {
         let r = rec("A", 100, 160);
         s.write_checkpoint(&r).unwrap();
         assert_eq!(s.load_checkpoint(), Some(r.clone()));
-        assert_eq!(s.recover().unwrap(), Some(r.clone()));
+        assert_eq!(s.recover().unwrap(), vec![r.clone()]);
         assert_eq!(s.load_all().unwrap(), vec![r]);
         assert_eq!(s.load_checkpoint(), None);
-        assert_eq!(s.recover().unwrap(), None);
+        assert!(s.recover().unwrap().is_empty());
     }
 
     #[test]
@@ -313,7 +430,7 @@ mod tests {
         let r = rec("A", 100, 160);
         s.append(&rec("A", 100, 170)).unwrap();
         s.write_checkpoint(&r).unwrap();
-        assert_eq!(s.recover().unwrap(), None);
+        assert!(s.recover().unwrap().is_empty());
         assert_eq!(lines(&s), 1);
         assert!(!s.checkpoint_path().exists());
     }
@@ -324,9 +441,12 @@ mod tests {
         let s = Store::open(&d.0).unwrap();
         fs::write(s.checkpoint_path(), b"{not json").unwrap();
         assert_eq!(s.load_checkpoint(), None);
-        assert_eq!(s.recover().unwrap(), None);
+        assert!(s.recover().unwrap().is_empty());
         assert!(!s.checkpoint_path().exists());
-        assert_eq!(fs::read(d.0.join(CHECKPOINT_BAD)).unwrap(), b"{not json");
+        assert_eq!(
+            fs::read(d.0.join("current.json.bad")).unwrap(),
+            b"{not json"
+        );
         assert!(s.load_all().unwrap().is_empty());
     }
 
@@ -340,7 +460,7 @@ mod tests {
         assert_eq!(s.load_checkpoint(), None);
         // Crash after append, before clear: checkpoint still present.
         s.write_checkpoint(&r).unwrap();
-        assert_eq!(s.recover().unwrap(), None);
+        assert!(s.recover().unwrap().is_empty());
         assert_eq!(s.load_all().unwrap(), vec![r]);
         assert_eq!(lines(&s), 1);
     }
@@ -360,12 +480,12 @@ mod tests {
         write_atomic(&p, b"one").unwrap();
         write_atomic(&p, b"two").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"two");
-        assert!(!d.0.join("f.json.tmp").exists());
+        assert!(!tmp_files(&d.0));
         // Failure (target is a directory) removes the temp file.
         let dir_target = d.0.join("sub");
         fs::create_dir_all(&dir_target).unwrap();
         assert!(write_atomic(&dir_target, b"x").is_err());
-        assert!(!d.0.join("sub.tmp").exists());
+        assert!(!tmp_files(&d.0));
     }
 
     #[test]
@@ -377,5 +497,79 @@ mod tests {
         s.write_checkpoint(&rec("Ünïcödé", 60, 70)).unwrap();
         assert_eq!(s.load_all().unwrap(), vec![r]);
         assert_eq!(s.load_checkpoint().unwrap().game, "Ünïcödé");
+    }
+
+    #[test]
+    fn valid_last_line_without_newline_then_append() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let a = rec("A", 1, 10);
+        fs::write(s.sessions_path(), serde_json::to_vec(&a).unwrap()).unwrap();
+        let b = rec("B", 20, 30);
+        s.append(&b).unwrap();
+        assert_eq!(lines(&s), 2);
+        assert_eq!(s.load_all().unwrap(), vec![a, b]);
+    }
+
+    #[test]
+    fn unreadable_checkpoint_kept_as_pending_and_recovered_later() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        // A directory named current.json cannot be read as a file.
+        fs::create_dir(s.checkpoint_path()).unwrap();
+        assert!(s.recover().is_err());
+        assert!(!s.checkpoint_path().exists());
+        let pend = pending_files(&d.0);
+        assert_eq!(pend.len(), 1);
+        // The unreadable pending entry is still not lost; make it readable.
+        let r = rec("A", 100, 160);
+        fs::remove_dir(&pend[0]).unwrap();
+        fs::write(&pend[0], serde_json::to_vec(&r).unwrap()).unwrap();
+        assert_eq!(s.recover().unwrap(), vec![r.clone()]);
+        assert!(pending_files(&d.0).is_empty());
+        assert_eq!(s.load_all().unwrap(), vec![r]);
+    }
+
+    #[test]
+    fn pending_recovery_dedupes() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let r = rec("A", 100, 160);
+        s.append(&r).unwrap();
+        fs::write(
+            d.0.join("current.5.pending.json"),
+            serde_json::to_vec(&r).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            d.0.join("current.6.pending.json"),
+            serde_json::to_vec(&rec("B", 200, 260)).unwrap(),
+        )
+        .unwrap();
+        let got = s.recover().unwrap();
+        assert_eq!(got, vec![rec("B", 200, 260)]);
+        assert!(pending_files(&d.0).is_empty());
+        assert_eq!(lines(&s), 2);
+    }
+
+    #[test]
+    fn longer_checkpoint_than_log_is_appended() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        s.append(&rec("A", 100, 150)).unwrap();
+        let longer = rec("A", 100, 190);
+        s.write_checkpoint(&longer).unwrap();
+        assert_eq!(s.recover().unwrap(), vec![longer.clone()]);
+        assert_eq!(s.load_all().unwrap(), vec![longer]);
+    }
+
+    #[test]
+    fn close_session_ok() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let r = rec("A", 1, 2);
+        s.write_checkpoint(&r).unwrap();
+        s.close_session(&r).unwrap();
+        assert!(s.load_checkpoint().is_none());
     }
 }
