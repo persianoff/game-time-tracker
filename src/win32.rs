@@ -452,8 +452,8 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(days_from_civil(2000, 3, 1), 11017);
-        assert_eq!(days_from_civil(2026, 11, 7), 20399);
-        assert_eq!(civil_from_days(20399), (2026, 11, 7));
+        assert_eq!(days_from_civil(2026, 11, 7), 20764);
+        assert_eq!(civil_from_days(20764), (2026, 11, 7));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
     }
 
@@ -475,7 +475,7 @@ mod tests {
     fn utc_formatting() {
         assert_eq!(format_utc(0), "1970-01-01 00:00:00");
         assert_eq!(
-            format_utc(20399 * 86400 + 21 * 3600 + 31 * 60 + 5),
+            format_utc(20764 * 86400 + 21 * 3600 + 31 * 60 + 5),
             "2026-11-07 21:31:05"
         );
     }
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn iso_formatting() {
-        let t = 20399 * 86400 + 21 * 3600 + 31 * 60 + 5;
+        let t = 20764 * 86400 + 21 * 3600 + 31 * 60 + 5;
         assert_eq!(format_iso(t, 3600), "2026-11-07T22:31:05+01:00");
         assert_eq!(format_iso(0, -5 * 3600), "1969-12-31T19:00:00-05:00");
         assert_eq!(format_iso(0, 5 * 3600 + 1800), "1970-01-01T05:30:00+05:30");
