@@ -98,7 +98,15 @@ GT.agg = (function () {
   // Calendar days/hours are derived by shifting utcMs by offsetMin and then
   // reading the result with the getUTC* accessors. The browser's own time
   // zone is never consulted.
-  var ISO_RE = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)$/;
+  var ISO_RE = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)(?:\.\d+)?(Z|[+-]\d\d:?\d\d)$/i;
+
+  // Like Date.UTC but years 0-99 are not mapped to 1900-1999.
+  function utcMs(y, mo, d, h, mi, s) {
+    var dt = new Date(0);
+    dt.setUTCFullYear(y, mo - 1, d);
+    dt.setUTCHours(h, mi, s, 0);
+    return dt.getTime();
+  }
 
   function parseTime(str) {
     if (typeof str !== "string") return null;
@@ -107,13 +115,15 @@ GT.agg = (function () {
     var y = +m[1], mo = +m[2], d = +m[3], h = +m[4], mi = +m[5], s = +m[6];
     if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return null;
     var offsetMin = 0;
-    if (m[7] !== "Z") {
+    if (m[7].toUpperCase() !== "Z") {
       var sign = m[7][0] === "-" ? -1 : 1;
       var digits = m[7].slice(1).replace(":", "");
-      offsetMin = sign * (+digits.slice(0, 2) * 60 + +digits.slice(2));
+      var oh = +digits.slice(0, 2), om = +digits.slice(2);
+      if (oh > 14 || om > 59) return null;
+      offsetMin = sign * (oh * 60 + om);
     }
-    // Date.UTC treats the fields as UTC; subtracting the offset gives the true instant.
-    var wallAsUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+    // Treat the wall-clock fields as UTC; subtracting the offset gives the true instant.
+    var wallAsUtc = utcMs(y, mo, d, h, mi, s);
     if (new Date(wallAsUtc).getUTCDate() !== d) return null; // e.g. Feb 31 rolled over
     return { utcMs: wallAsUtc - offsetMin * 60000, offsetMin: offsetMin };
   }
@@ -164,27 +174,38 @@ GT.agg = (function () {
 
   // ---- Splitting by local day -----------------------------------------
   // Splits each session at local midnight. Midnights are taken in the START
-  // time's offset for the whole session (a session spanning a DST change is
-  // split at the start's midnights; the error is at most one hour of wall clock).
+  // time's offset, except that the END day is always localDay(end) (computed in
+  // the END offset): if the offset changes inside a session (DST), the cut for
+  // the end day is taken at the end offset's midnight and no piece can land on
+  // a day after localDay(end). Before that cut the start offset is used, so
+  // near the DST change a boundary can be off by up to one hour.
   // active_s is distributed proportionally to wall-clock overlap with each day
   // (APPROXIMATION: the tracker doesn't record where pauses happened). Integer
   // seconds are kept by cumulative rounding, so pieces always sum to active_s.
-  // Piece: {game, source, day, startMs, endMs, active_s, sid, sessionActive_s}
+  // Piece: {game, source, day, startMs, endMs, offsetMin, active_s, sid, sessionActive_s}
+  // `sid` is the session's index within THIS call's input; do not mix pieces
+  // from separate splitByDay calls in one byGame/summary call.
   function splitByDay(sessions) {
     var pieces = [];
     for (var i = 0; i < sessions.length; i++) {
       var s = sessions[i], off = s.start.offsetMin;
       var sMs = s.start.utcMs, eMs = s.end.utcMs, total = eMs - sMs;
+      var endDay = localDay(s.end);
+      var endMid = keyToLocalMs(endDay) - s.end.offsetMin * 60000; // end day's midnight as a UTC instant
       var cuts = [sMs]; // piece boundaries as UTC instants
       var midnight = Math.floor(localMs(sMs, off) / DAY_MS) * DAY_MS; // local midnight (local-as-UTC)
-      for (var m = midnight + DAY_MS; m - off * 60000 < eMs; m += DAY_MS) cuts.push(m - off * 60000);
+      for (var m = midnight + DAY_MS; m - off * 60000 < endMid && m - off * 60000 < eMs; m += DAY_MS) cuts.push(m - off * 60000);
+      var lastDay = dayKeyFromLocalMs(localMs(cuts[cuts.length - 1], off));
+      if (endMid > cuts[cuts.length - 1] && endMid < eMs && lastDay !== endDay) cuts.push(endMid);
       cuts.push(eMs);
       var prevCum = 0;
       for (var c = 0; c + 1 < cuts.length; c++) {
         var cum = total > 0 ? Math.round(s.active_s * (cuts[c + 1] - sMs) / total) : s.active_s;
         if (c + 2 === cuts.length) cum = s.active_s; // last piece takes the remainder exactly
-        pieces.push({ game: s.game, source: s.source, day: dayKeyFromLocalMs(localMs(cuts[c], off)),
-                      startMs: cuts[c], endMs: cuts[c + 1], active_s: cum - prevCum, sid: i, sessionActive_s: s.active_s });
+        var atEnd = cuts[c] >= endMid;
+        pieces.push({ game: s.game, source: s.source, day: atEnd ? endDay : dayKeyFromLocalMs(localMs(cuts[c], off)),
+                      startMs: cuts[c], endMs: cuts[c + 1], offsetMin: atEnd ? s.end.offsetMin : off,
+                      active_s: cum - prevCum, sid: i, sessionActive_s: s.active_s });
         prevCum = cum;
       }
     }
@@ -205,11 +226,13 @@ GT.agg = (function () {
     return map;
   }
 
+  // Groups by game NAME only (the source shown is the first one seen).
+  // Zero-active pieces are ignored: a session counts if any of its pieces has active_s > 0.
   function byGame(pieces, range) {
     var map = new Map();
     for (var i = 0; i < pieces.length; i++) {
       var p = pieces[i];
-      if (!inRange(p.day, range)) continue;
+      if (!inRange(p.day, range) || p.active_s <= 0) continue;
       var g = map.get(p.game);
       if (!g) { g = { game: p.game, source: p.source, total_s: 0, sids: new Set(), longest_s: 0, daySet: new Set() }; map.set(p.game, g); }
       g.total_s += p.active_s;
@@ -259,8 +282,7 @@ GT.agg = (function () {
     for (var i = 0; i < name.length; i++) h = ((h * 33) ^ name.charCodeAt(i)) >>> 0;
     return h % PALETTE.length;
   }
-  function gameColor(name) { return gameColorIndex(name); }
-  function colorOf(name) { return PALETTE[gameColorIndex(name)]; }
+  function gameColor(name) { return PALETTE[gameColorIndex(name)]; }
 
   function formatDuration(s) {
     s = Math.max(0, Math.floor(s));
@@ -272,7 +294,7 @@ GT.agg = (function () {
   return { parseTime: parseTime, localDay: localDay, localHour: localHour, localMinute: localMinute,
            validateSession: validateSession, parseDocument: parseDocument, splitByDay: splitByDay,
            byDay: byDay, byGame: byGame, summary: summary, ranges: ranges, gameColor: gameColor,
-           colorOf: colorOf, palette: PALETTE, formatDuration: formatDuration };
+           gameColorIndex: gameColorIndex, palette: PALETTE, formatDuration: formatDuration };
 })();
 </script>
 
@@ -338,6 +360,34 @@ GT.selftest = function () {
     var d = A.byDay(p);
     return (d.get("2026-10-24").total_s === 3600 && d.get("2026-10-25").total_s === 3600 &&
             d.get("2026-10-26").total_s === 1800 && d.size === 3) || days(p);
+  });
+  test("split: DST span 10-24 22:00+02 -> 10-25 23:30+01 ends on 10-25, no 10-26 piece", function () {
+    var p = A.splitByDay([S("G", "2026-10-24T22:00:00+02:00", "2026-10-25T23:30:00+01:00", 95400)]);
+    return days(p) === "2026-10-24:7200,2026-10-25:88200" || days(p);
+  });
+  test("split: DST span ending on a later day still ends on localDay(end)", function () {
+    var p = A.splitByDay([S("G", "2026-10-25T20:00:00+01:00", "2026-10-26T01:00:00+01:00", 18000)]);
+    return (p[p.length - 1].day === "2026-10-26" && p.length === 2 && p[0].active_s + p[1].active_s === 18000) || days(p);
+  });
+  test("split: Z and negative offsets (-05:00, 23:00 -> 01:00 local)", function () {
+    var a = A.splitByDay([S("G", "2026-08-10T23:00:00-05:00", "2026-08-11T01:00:00-05:00", 6000)]);
+    var b = A.splitByDay([S("G", "2026-08-10T23:00:00Z", "2026-08-11T01:00:00z", 6000)]);
+    return (days(a) === "2026-08-10:3000,2026-08-11:3000" && days(b) === days(a) && a[0].offsetMin === -300) || days(a) + " | " + days(b);
+  });
+  test("split: session starting exactly at midnight has no empty previous day", function () {
+    var p = A.splitByDay([S("G", "2026-08-11T00:00:00+02:00", "2026-08-11T02:00:00+02:00", 7200)]);
+    return days(p) === "2026-08-11:7200" || days(p);
+  });
+  test("zero-active pieces are not counted as days/sessions", function () {
+    // 23:00-01:00 with active 1 s: rounding puts 1 s on 08-10 and 0 s on 08-11
+    var p = A.splitByDay([S("G", "2026-08-10T23:00:00+02:00", "2026-08-11T01:00:00+02:00", 1)]);
+    var g = A.byGame(p, null), sm = A.summary(p, null);
+    return (days(p) === "2026-08-10:1,2026-08-11:0" && g[0].days === 1 && g[0].sessions === 1 && sm.days_played === 1) || days(p) + JSON.stringify(g);
+  });
+  test("parseTime rejects out-of-range offsets, accepts lowercase t/z", function () {
+    return (A.parseTime("2026-11-07T20:00:00+15:00") === null && A.parseTime("2026-11-07T20:00:00+01:60") === null &&
+            A.parseTime("2026-11-07t20:00:00z").utcMs === Date.UTC(2026, 10, 7, 20) &&
+            A.parseTime("2026-11-07T20:00:00+14:00") !== null) || "bad";
   });
   test("byDay: per-game breakdown", function () {
     var d = A.byDay(A.splitByDay([
@@ -411,8 +461,9 @@ GT.selftest = function () {
     return true;
   });
   test("gameColor: deterministic, in palette range", function () {
-    var a = A.gameColor("Hades"), b = A.gameColor("Hades");
-    return (a === b && a >= 0 && a < A.palette.length && A.gameColor("") >= 0) || "bad";
+    var a = A.gameColorIndex("Hades");
+    return (a === A.gameColorIndex("Hades") && a >= 0 && a < A.palette.length &&
+            A.gameColor("Hades") === A.palette[a] && /^#[0-9a-f]{6}$/.test(A.gameColor(""))) || "bad";
   });
   return results;
 };
@@ -444,13 +495,25 @@ GT.selftest = function () {
     return A.parseDocument(doc);
   }
 
+  // Tags errors where silently trying the next source is appropriate (server unreachable / 404).
+  function fallthrough(err) { err.fallthrough = true; return err; }
+
+  // Render, surfacing any exception as a visible error instead of a silent failure.
+  function safeShow(data, label) {
+    try { show(data, label); return true; }
+    catch (e) { console.error(e); showError("Could not display the data: " + e.message); $("loader").classList.add("open"); return false; }
+  }
+
   function fetchSource(url) {
     return fetch(url, { cache: "no-store" }).then(function (res) {
-      if (!res.ok) throw new Error("Could not load " + url + ": HTTP " + res.status + " " + res.statusText);
+      if (!res.ok) {
+        var e = new Error("Could not load " + url + ": HTTP " + res.status + " " + res.statusText);
+        throw res.status === 404 ? fallthrough(e) : e;
+      }
       return res.text();
     }, function () {
-      throw new Error("Could not reach " + url + ".\nThe server may be offline, or the browser blocked the request (CORS / mixed content). " +
-                      "When this page is not served by the tracker, the tracker must send Access-Control-Allow-Origin: *.");
+      throw fallthrough(new Error("Could not reach " + url + ".\nThe server may be offline, or the browser blocked the request (CORS / mixed content). " +
+                      "When this page is not served by the tracker, the tracker must send Access-Control-Allow-Origin: *."));
     }).then(function (text) { return loadText(url, text); });
   }
 
@@ -463,7 +526,7 @@ GT.selftest = function () {
     return fetchSource(url).then(function (data) {
       if (remember) rememberSource(url);
       $("url").value = url;
-      show(data, url);
+      safeShow(data, url);
     }, function (err) { showError(err.message); $("loader").classList.add("open"); });
   }
 
@@ -471,8 +534,9 @@ GT.selftest = function () {
     showError("");
     var r = new FileReader();
     r.onload = function () {
-      try { show(loadText(file.name, r.result), "file: " + file.name); }
-      catch (e) { showError(e.message); }
+      var data;
+      try { data = loadText(file.name, r.result); } catch (e) { showError(e.message); return; }
+      safeShow(data, "file: " + file.name);
     };
     r.onerror = function () { showError("Could not read " + file.name + "."); };
     r.readAsText(file);
@@ -483,11 +547,16 @@ GT.selftest = function () {
     var src = new URLSearchParams(location.search).get("src");
     if (src) return loadFromUrl(src, true);
     var served = location.protocol === "http:" || location.protocol === "https:";
-    var chain = Promise.reject(new Error("not served"));
-    if (served) chain = fetchSource("./sessions.json").then(function (d) { show(d, location.origin + "/sessions.json"); });
-    return chain.then(null, function () {
+    function fallback() {
       var saved = savedSource();
       if (saved) { $("url").value = saved; return loadFromUrl(saved, false); }
+      $("loader").classList.add("open");
+    }
+    if (!served) return fallback();
+    var base = new URL("./sessions.json", location.href).href;
+    return fetchSource(base).then(function (data) { safeShow(data, base); }, function (err) {
+      if (err.fallthrough) return fallback(); // unreachable or 404: not served by a tracker, try the next source
+      showError(err.message); // 5xx, bad JSON, unsupported version...: tell the user
       $("loader").classList.add("open");
     });
   }
@@ -500,7 +569,7 @@ GT.selftest = function () {
     // "Today" comes from the generated stamp in the game PC's offset, so it never depends on the viewer's time zone.
     var refDay;
     if (data.generated) refDay = A.localDay(data.generated);
-    else if (pieces.length) refDay = pieces[pieces.length - 1].day;
+    else if (pieces.length) refDay = pieces.reduce(function (mx, p) { return p.day > mx ? p.day : mx; }, "0000-00-00");
     else refDay = "1970-01-01";
     var month = A.ranges(refDay).month;
     showError("");
@@ -542,7 +611,7 @@ GT.selftest = function () {
 
   function renderGames(games) {
     renderTable($("games"), ["Game", "Total", "Sessions", "Avg", "Longest", "Days"], games.map(function (g) {
-      var sw = el("span", { className: "swatch" }); sw.style.background = A.colorOf(g.game);
+      var sw = el("span", { className: "swatch" }); sw.style.background = A.gameColor(g.game);
       return [el("td", null, [sw, g.game + " (" + g.source + ")"]), A.formatDuration(g.total_s), String(g.sessions),
               A.formatDuration(g.avg_session_s), A.formatDuration(g.longest_s), String(g.days)];
     }));
@@ -579,11 +648,13 @@ GT.selftest = function () {
   $("url").onkeydown = function (e) { if (e.key === "Enter") $("urlbtn").onclick(); };
   $("pick").onclick = function () { $("file").click(); };
   $("file").onchange = function () { if (this.files[0]) loadFromFile(this.files[0]); this.value = ""; };
+  function hasFiles(e) { return !!e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], "Files") >= 0; }
   ["dragenter", "dragover"].forEach(function (ev) {
-    document.addEventListener(ev, function (e) { e.preventDefault(); $("drop").classList.add("over"); $("loader").classList.add("open"); });
+    document.addEventListener(ev, function (e) { if (!hasFiles(e)) return; e.preventDefault(); $("drop").classList.add("over"); $("loader").classList.add("open"); });
   });
   document.addEventListener("dragleave", function (e) { if (!e.relatedTarget) $("drop").classList.remove("over"); });
   document.addEventListener("drop", function (e) {
+    if (!hasFiles(e)) return;
     e.preventDefault(); $("drop").classList.remove("over");
     if (e.dataTransfer.files[0]) loadFromFile(e.dataTransfer.files[0]);
   });
