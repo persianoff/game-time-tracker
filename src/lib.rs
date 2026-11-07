@@ -1,4 +1,5 @@
 pub mod config;
+pub mod detect;
 pub mod log;
 pub mod session;
 pub mod steam;
