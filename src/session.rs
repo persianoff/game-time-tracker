@@ -3,22 +3,26 @@
 //! The caller polls (about once per second) and calls [`Tracker::step`] with the
 //! current UTC epoch seconds and the foreground game, if any.
 //!
-//! Attribution rule (error at most one poll): a poll interval `[last_poll, now]`
-//! is credited to `active_s` only if the game was in the foreground at *both*
-//! ends. When focus is lost, the session's `end` is the last poll at which the
-//! game was still focused; the interval up to the poll that noticed the loss is
-//! not counted. The same applies on resume: the gap (including the resume poll
-//! interval) is not counted.
+//! Attribution is sample-and-hold: the interval `[last_poll, now]` is credited
+//! to whatever was focused at `last_poll`, provided `0 <= now - last_poll <=
+//! sleep_gap_s`. Consequently:
+//! - a game focused for a single poll followed by focus loss gets one poll
+//!   interval;
+//! - on focus loss (or a direct switch) `end` is the poll at which the change
+//!   was first observed, and that is also the pause start;
+//! - on resume within the merge gap, the paused gap is credited to nothing;
+//! - after a sleep gap or a backwards clock the gap is not credited and the open
+//!   session is closed at its last credited time.
 
 /// A closed (or snapshotted) play session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session<G> {
     pub game: G,
-    /// UTC epoch seconds of the first focused poll.
+    /// UTC epoch seconds of the poll that first saw the game focused.
     pub start: u64,
-    /// UTC epoch seconds of the last focused poll.
+    /// UTC epoch seconds up to which time was credited.
     pub end: u64,
-    /// Seconds the game was actually in the foreground.
+    /// Seconds the game was credited as being in the foreground.
     pub active_s: u64,
 }
 
@@ -26,11 +30,11 @@ pub struct Session<G> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Params {
     /// A paused session resumes if the same game regains focus within this many
-    /// seconds of the last focused poll (inclusive).
+    /// seconds of the pause start (inclusive).
     pub merge_gap_s: u64,
     /// A gap between polls larger than this (or a clock going backwards) is
     /// treated as sleep/hibernate/clock jump: the open session is closed at its
-    /// last focused poll.
+    /// last credited time and the gap is not credited.
     pub sleep_gap_s: u64,
 }
 
@@ -47,14 +51,14 @@ impl Default for Params {
 struct Open<G> {
     game: G,
     start: u64,
-    /// Last focused poll (pause start when `!focused`).
+    /// Last credited time (pause start when `!focused`).
     end: u64,
     active_s: u64,
     focused: bool,
 }
 
 impl<G> Open<G> {
-    /// Sessions with no accrued active time are dropped.
+    /// Sessions with no credited time are dropped.
     fn into_session(self) -> Option<Session<G>> {
         (self.active_s > 0).then(|| Session {
             game: self.game,
@@ -106,16 +110,18 @@ impl<G: Clone + PartialEq> Tracker<G> {
     pub fn step(&mut self, now: u64, fg: Option<&G>) -> Option<Session<G>> {
         let mut closed = None;
 
-        let slept = matches!(
-            self.last_poll,
-            Some(lp) if now < lp || now - lp > self.params.sleep_gap_s
-        );
-        self.last_poll = Some(now);
+        let lp = self.last_poll.replace(now);
+        let slept = matches!(lp, Some(l) if now < l || now - l > self.params.sleep_gap_s);
         if slept {
+            // Close at the last credited time; the gap is not credited.
             closed = self.close_open();
-        } else if let Some(o) = &self.open {
-            // Paused too long: close at pause start.
-            if !o.focused && now.saturating_sub(o.end) > self.params.merge_gap_s {
+        } else if let (Some(l), Some(o)) = (lp, self.open.as_mut()) {
+            if o.focused {
+                // Sample-and-hold: credit the interval to the game focused at `l`.
+                o.active_s += now - l;
+                o.end = now;
+            } else if now - o.end > self.params.merge_gap_s {
+                // Paused too long: close at pause start.
                 closed = self.close_open();
             }
         }
@@ -124,10 +130,7 @@ impl<G: Clone + PartialEq> Tracker<G> {
             (None, Some(g)) => self.open = Some(Self::open_new(now, g)),
             (None, None) => {}
             (Some(o), Some(g)) if *g == o.game => {
-                if o.focused {
-                    o.active_s += now - o.end;
-                }
-                // On resume the gap is not counted.
+                // Resume (if paused) or continue; a paused gap is not credited.
                 o.focused = true;
                 o.end = now;
             }
@@ -136,13 +139,16 @@ impl<G: Clone + PartialEq> Tracker<G> {
                 closed = self.close_open();
                 self.open = Some(Self::open_new(now, g));
             }
+            // Focus lost: `end` is already `now` if it was credited; the pause
+            // starts here. If already paused this is a no-op.
             (Some(o), None) => o.focused = false,
         }
         closed
     }
 
     /// Snapshot of the open or paused session (for checkpointing), with `end` at
-    /// the last focused poll. `None` if idle or nothing has been accrued yet.
+    /// the last credited time. It is always a prefix of the session that will
+    /// eventually close. `None` if idle or nothing has been credited yet.
     pub fn current(&self) -> Option<Session<G>> {
         self.open
             .as_ref()
@@ -207,8 +213,8 @@ mod tests {
         seq.extend(run(11, 40, None));
         seq.extend(run(41, 50, Some('a')));
         assert!(feed(&mut t, &seq).is_empty());
-        // 10 s before pause; resume poll at 41 not counted; 41..50 = 9 s.
-        assert_eq!(t.flush(), Some(s('a', 0, 50, 19)));
+        // 0..11 credited (11 s, loss seen at 11); gap 11..41 not credited; 41..50 = 9 s.
+        assert_eq!(t.flush(), Some(s('a', 0, 50, 20)));
     }
 
     #[test]
@@ -217,20 +223,20 @@ mod tests {
             merge_gap_s: 60,
             sleep_gap_s: 1000,
         };
-        // Pause starts at 10; back at 70 (gap exactly 60): merged.
-        let mut t = Tracker::new(p);
-        let mut seq = run(0, 10, Some('a'));
-        seq.extend(run(11, 69, None));
-        seq.extend([(70, Some('a')), (71, Some('a'))]);
-        assert!(feed(&mut t, &seq).is_empty());
-        assert_eq!(t.flush(), Some(s('a', 0, 71, 11)));
-        // Back at 71 (gap 61): separate sessions.
+        // Pause starts at 11; back at 71 (gap exactly 60): merged.
         let mut t = Tracker::new(p);
         let mut seq = run(0, 10, Some('a'));
         seq.extend(run(11, 70, None));
         seq.extend([(71, Some('a')), (72, Some('a'))]);
-        assert_eq!(feed(&mut t, &seq), vec![s('a', 0, 10, 10)]);
-        assert_eq!(t.flush(), Some(s('a', 71, 72, 1)));
+        assert!(feed(&mut t, &seq).is_empty());
+        assert_eq!(t.flush(), Some(s('a', 0, 72, 12)));
+        // Back at 72 (gap 61): separate sessions.
+        let mut t = Tracker::new(p);
+        let mut seq = run(0, 10, Some('a'));
+        seq.extend(run(11, 71, None));
+        seq.extend([(72, Some('a')), (73, Some('a'))]);
+        assert_eq!(feed(&mut t, &seq), vec![s('a', 0, 11, 11)]);
+        assert_eq!(t.flush(), Some(s('a', 72, 73, 1)));
     }
 
     #[test]
@@ -239,7 +245,7 @@ mod tests {
         let mut seq = run(0, 10, Some('a'));
         seq.extend(run(11, 80, None));
         let closed = feed(&mut t, &seq);
-        assert_eq!(closed, vec![s('a', 0, 10, 10)]);
+        assert_eq!(closed, vec![s('a', 0, 11, 11)]);
         // Returning later starts a fresh session.
         let closed = feed(&mut t, &run(81, 90, Some('a')));
         assert!(closed.is_empty());
@@ -252,7 +258,7 @@ mod tests {
         let mut seq = run(0, 10, Some('a'));
         seq.extend(run(11, 20, Some('b')));
         let closed = feed(&mut t, &seq);
-        assert_eq!(closed, vec![s('a', 0, 10, 10)]);
+        assert_eq!(closed, vec![s('a', 0, 11, 11)]);
         assert_eq!(t.flush(), Some(s('b', 11, 20, 9)));
     }
 
@@ -263,7 +269,7 @@ mod tests {
         seq.extend(run(11, 20, None));
         seq.extend(run(21, 30, Some('b')));
         let closed = feed(&mut t, &seq);
-        assert_eq!(closed, vec![s('a', 0, 10, 10)]);
+        assert_eq!(closed, vec![s('a', 0, 11, 11)]);
         assert_eq!(t.flush(), Some(s('b', 21, 30, 9)));
     }
 
@@ -285,7 +291,7 @@ mod tests {
         seq.extend(run(11, 15, None));
         seq.push((1000, None));
         let closed = feed(&mut t, &seq);
-        assert_eq!(closed, vec![s('a', 0, 10, 10)]);
+        assert_eq!(closed, vec![s('a', 0, 11, 11)]);
         assert_eq!(t.current(), None);
     }
 
@@ -308,7 +314,7 @@ mod tests {
 
         feed(&mut t, &run(10, 15, Some('a')));
         feed(&mut t, &run(16, 20, None));
-        assert_eq!(t.flush(), Some(s('a', 10, 15, 5)));
+        assert_eq!(t.flush(), Some(s('a', 10, 16, 6)));
         assert_eq!(t.current(), None);
     }
 
@@ -317,33 +323,46 @@ mod tests {
         let mut t = tr();
         assert_eq!(t.current(), None);
         t.step(0, Some(&'a'));
-        assert_eq!(t.current(), None); // nothing accrued yet
+        assert_eq!(t.current(), None); // nothing credited yet
         t.step(1, Some(&'a'));
         t.step(2, Some(&'a'));
         assert_eq!(t.current(), Some(s('a', 0, 2, 2)));
         t.step(3, None);
         t.step(4, None);
-        assert_eq!(t.current(), Some(s('a', 0, 2, 2))); // paused: end = last focus
+        assert_eq!(t.current(), Some(s('a', 0, 3, 3))); // paused: end = loss poll
         t.step(5, Some(&'a'));
+        assert_eq!(t.current(), Some(s('a', 0, 5, 3))); // gap not credited
         t.step(6, Some(&'a'));
-        assert_eq!(t.current(), Some(s('a', 0, 6, 3)));
+        assert_eq!(t.current(), Some(s('a', 0, 6, 4)));
     }
 
     #[test]
-    fn single_poll_focus_dropped() {
+    fn single_poll_focus_gets_one_interval() {
         let mut t = tr();
         let mut seq = vec![(0, Some('a'))];
         seq.extend(run(1, 100, None));
-        assert!(feed(&mut t, &seq).is_empty());
+        assert_eq!(feed(&mut t, &seq), vec![s('a', 0, 1, 1)]);
         assert_eq!(t.flush(), None);
 
-        // Single-poll game between two real stretches of another game.
+        // Single-poll game between two stretches of another game.
         let mut seq = run(200, 210, Some('a'));
         seq.push((211, Some('b')));
         seq.extend(run(212, 220, Some('a')));
         let closed = feed(&mut t, &seq);
-        assert_eq!(closed, vec![s('a', 200, 210, 10)]);
+        assert_eq!(closed, vec![s('a', 200, 211, 11), s('b', 211, 212, 1)]);
         assert_eq!(t.flush(), Some(s('a', 212, 220, 8)));
+    }
+
+    #[test]
+    fn zero_credit_sessions_dropped() {
+        let mut t = tr();
+        t.step(0, Some(&'a'));
+        assert_eq!(t.flush(), None);
+        // Duplicate-time switch: a gets 0 s and is dropped.
+        t.step(5, Some(&'a'));
+        assert_eq!(t.step(5, Some(&'b')), None);
+        t.step(6, Some(&'b'));
+        assert_eq!(t.flush(), Some(s('b', 5, 6, 1)));
     }
 
     #[test]
@@ -366,19 +385,42 @@ mod tests {
         }
     }
 
+    fn gi(c: char) -> usize {
+        (c as u8 - b'a') as usize
+    }
+
+    /// Irregular polling (0..=3 s steps incl. duplicates, rare sleep gaps, rarer
+    /// backwards clock) over random foreground changes, checked against a
+    /// per-game oracle and structural invariants.
     #[test]
     fn property_random_foreground() {
+        let params = Params::default();
         for seed in 0..20u64 {
             let mut rng = Lcg(seed + 1);
-            let mut t = tr();
-            let mut sessions = Vec::new();
-            let mut prev: Option<char> = None;
-            let mut truth = 0u64;
+            let mut t = Tracker::new(params);
+            // (session, epoch); the epoch increments on every backwards clock.
+            let mut sessions: Vec<(Session<char>, u32)> = Vec::new();
+            // (time, epoch, fg) per poll, chronological by index.
+            let mut polls: Vec<(u64, u32, Option<char>)> = Vec::new();
+            // Forward sleep events: (prev poll time, poll time, epoch).
+            let mut sleeps: Vec<(u64, u64, u32)> = Vec::new();
+            let mut oracle = [0u64; 3];
+            let mut epoch = 0u32;
             let mut fg: Option<char> = None;
-            let mut now = 1_000u64;
-            let end_t = now + 20_000;
-            while now < end_t {
-                // Change focus with ~2% probability per poll.
+            let mut now = 10_000u64;
+            let mut prev: Option<(u64, Option<char>)> = None;
+
+            for i in 0..10_000 {
+                if i > 0 {
+                    let r = rng.next() % 1000;
+                    now = if r < 5 {
+                        now.saturating_sub(1 + rng.next() % 50)
+                    } else if r < 20 {
+                        now + 11 + rng.next() % 300
+                    } else {
+                        now + rng.next() % 4
+                    };
+                }
                 if rng.next().is_multiple_of(50) {
                     fg = match rng.next() % 4 {
                         0 => None,
@@ -387,30 +429,84 @@ mod tests {
                         _ => Some('c'),
                     };
                 }
-                if fg.is_some() && fg == prev {
-                    truth += 1;
+                // A session returned by this step belongs to the old epoch.
+                let tag = epoch;
+                if let Some((pn, pf)) = prev {
+                    if now < pn {
+                        epoch += 1;
+                    } else if now - pn > params.sleep_gap_s {
+                        sleeps.push((pn, now, epoch));
+                    } else if let Some(g) = pf {
+                        oracle[gi(g)] += now - pn;
+                    }
                 }
-                prev = fg;
-                sessions.extend(t.step(now, fg.as_ref()));
-                now += 1;
+                polls.push((now, epoch, fg));
+                if let Some(x) = t.step(now, fg.as_ref()) {
+                    sessions.push((x, tag));
+                }
+                prev = Some((now, fg));
             }
-            sessions.extend(t.flush());
+            if let Some(x) = t.flush() {
+                sessions.push((x, epoch));
+            }
 
-            let mut last_end = 0;
-            let mut total = 0;
-            for x in &sessions {
+            let mut sums = [0u64; 3];
+            let mut last_in_order: Option<&(Session<char>, u32)> = None;
+            let mut last_of_game: [Option<&(Session<char>, u32)>; 3] = [None; 3];
+            for item in &sessions {
+                let (x, ex) = item;
                 assert!(x.start <= x.end, "seed {seed}: {x:?}");
-                assert!(x.active_s > 0);
+                assert!(x.active_s > 0, "seed {seed}: {x:?}");
                 assert!(x.active_s <= x.end - x.start, "seed {seed}: {x:?}");
-                assert!(x.start >= last_end, "seed {seed}: overlap at {x:?}");
-                last_end = x.end;
-                total += x.active_s;
+                sums[gi(x.game)] += x.active_s;
+
+                // Sessions of one epoch don't overlap (adjacent ones may touch,
+                // e.g. a direct switch closes and opens at the same poll).
+                if let Some((p, ep)) = last_in_order {
+                    if ep == ex {
+                        assert!(x.start >= p.end, "seed {seed}: overlap {p:?} {x:?}");
+                    }
+                }
+                last_in_order = Some(item);
+
+                // No session spans a sleep gap.
+                for &(a, b, e) in &sleeps {
+                    if e == *ex {
+                        assert!(
+                            !(x.start <= a && x.end >= b),
+                            "seed {seed}: {x:?} spans sleep"
+                        );
+                    }
+                }
+
+                // Same-game neighbours are split only for a legitimate reason.
+                let g = gi(x.game);
+                if let Some((p, ep)) = last_of_game[g] {
+                    if ep == ex {
+                        let big_gap = x.start - p.end > params.merge_gap_s;
+                        let other = || {
+                            polls.iter().any(|&(tm, e, f)| {
+                                e == *ex
+                                    && tm >= p.end
+                                    && tm <= x.start
+                                    && matches!(f, Some(h) if h != x.game)
+                            })
+                        };
+                        let slept = || {
+                            sleeps
+                                .iter()
+                                .any(|&(a, b, e)| e == *ex && a >= p.end && b <= x.start)
+                        };
+                        assert!(
+                            big_gap || other() || slept(),
+                            "seed {seed}: unjustified split {p:?} {x:?}"
+                        );
+                    }
+                }
+                last_of_game[g] = Some(item);
             }
-            // With 1 s polls and no sleep gaps, credited time equals the number
-            // of poll intervals focused on the same game at both ends: tolerance 0.
-            // (Versus continuous foreground time the error is at most one poll
-            // per focus run, by the attribution rule in the module docs.)
-            assert_eq!(total, truth, "seed {seed}");
+            // Per-game oracle, tolerance 0.
+            assert_eq!(sums, oracle, "seed {seed}");
         }
     }
 }
