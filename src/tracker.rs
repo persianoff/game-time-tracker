@@ -431,6 +431,7 @@ pub fn run(verbose: bool) -> i32 {
             Config::default()
         }
     };
+    crate::autostart::self_heal(&cfg);
 
     // Lifetimes: the mutex is declared first so the event drops before it.
     let Some(_instance) = win32::SingleInstance::acquire(MUTEX_NAME) else {

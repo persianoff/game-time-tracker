@@ -24,7 +24,8 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Some("scan" | "status" | "export" | "autostart") => {
+        Some("autostart") => ExitCode::from(gametime::autostart::cli(&args)),
+        Some("scan" | "status" | "export") => {
             println!("not implemented yet");
             ExitCode::SUCCESS
         }
