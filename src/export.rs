@@ -147,6 +147,7 @@ pub fn to_daily_json(daily: &stats::Daily, now: u64) -> String {
         generated: win32::format_iso_local(now),
         days: daily
             .iter()
+            .filter(|(_, s)| daily_minutes(**s) > 0.0)
             .map(|((d, g), s)| DailyRow {
                 date: date_str(*d),
                 game: g,
@@ -162,7 +163,7 @@ pub fn to_daily_json(daily: &stats::Daily, now: u64) -> String {
 /// `daily.csv`: BOM, header `date,game,minutes`, CRLF rows.
 pub fn to_daily_csv(daily: &stats::Daily) -> Vec<u8> {
     let mut s = String::from("\u{feff}date,game,minutes\r\n");
-    for ((d, g), secs) in daily {
+    for ((d, g), secs) in daily.iter().filter(|(_, s)| daily_minutes(**s) > 0.0) {
         s.push_str(&date_str(*d));
         s.push(',');
         csv_field(&mut s, g);
@@ -294,21 +295,55 @@ pub struct Payload {
     pub dropped: usize,
 }
 
-/// Load the closed sessions and format `sessions.json` (with the open session,
-/// if any), `gametime.ics`, `daily.csv` and `daily.json`. An open session that
-/// is already in the log (same game and start) is not added twice.
+/// The log plus the open session, loaded once; each format is built on demand.
+pub struct Loaded {
+    closed: Vec<SessionRecord>,
+    /// Open session not already in the log (same game and start).
+    open: Option<SessionRecord>,
+}
+
+impl Loaded {
+    /// Load the closed sessions and attach `open` unless the log already holds it.
+    pub fn load(store: &Store, open: Option<&SessionRecord>) -> io::Result<Loaded> {
+        let closed = store.load_all()?;
+        let open = open
+            .filter(|o| {
+                !closed
+                    .iter()
+                    .any(|c| c.game == o.game && c.start_utc == o.start_utc)
+            })
+            .cloned();
+        Ok(Loaded { closed, open })
+    }
+
+    pub fn sessions_json(&self, now: u64) -> Vec<u8> {
+        to_json(&self.closed, self.open.as_ref(), now).into_bytes()
+    }
+
+    pub fn ics(&self, now: u64) -> Vec<u8> {
+        to_ics(&self.closed, now).into_bytes()
+    }
+
+    /// Daily totals and the number of records dropped as invalid.
+    pub fn daily(&self) -> (stats::Daily, usize) {
+        stats::daily_checked(
+            self.closed.iter().chain(self.open.as_ref()),
+            win32::local_offset_secs,
+        )
+    }
+
+    pub fn daily_json(&self, now: u64) -> Vec<u8> {
+        to_daily_json(&self.daily().0, now).into_bytes()
+    }
+}
+
+/// Format all auto-export files (see [`Loaded`]).
 pub fn build_payload(store: &Store, open: Option<&SessionRecord>, now: u64) -> io::Result<Payload> {
-    let closed = store.load_all()?;
-    let open = open.filter(|o| {
-        !closed
-            .iter()
-            .any(|c| c.game == o.game && c.start_utc == o.start_utc)
-    });
-    let (daily, dropped) =
-        stats::daily_checked(closed.iter().chain(open), win32::local_offset_secs);
+    let l = Loaded::load(store, open)?;
+    let (daily, dropped) = l.daily();
     Ok(Payload {
-        json: to_json(&closed, open, now).into_bytes(),
-        ics: to_ics(&closed, now).into_bytes(),
+        json: l.sessions_json(now),
+        ics: l.ics(now),
         daily_csv: to_daily_csv(&daily),
         daily_json: to_daily_json(&daily, now).into_bytes(),
         dropped,
@@ -501,6 +536,7 @@ mod tests {
         d.insert(((2026, 1, 2), "A, B".into()), 90); // 1.5 min
         d.insert(((2026, 1, 2), "C".into()), 60); // 1.0
         d.insert(((2026, 1, 10), "C".into()), 7); // 0.1
+        d.insert(((2026, 1, 11), "Z".into()), 2); // rounds to 0.0: omitted
         let csv = String::from_utf8(to_daily_csv(&d)).unwrap();
         assert_eq!(
             csv,

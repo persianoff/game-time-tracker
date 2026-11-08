@@ -27,8 +27,15 @@ use crate::{export, log, win32};
 
 const VIEWER_HTML: &str = include_str!("../viewer/index.html");
 
-/// Longest accepted request line (plus whatever else arrived in the first reads).
+/// Bytes of the request kept for routing (the request line is in here).
 const REQ_BUF: usize = 2048;
+/// Total request size accepted (line, headers, anything else); more gets a 431.
+const REQ_MAX: usize = 16 * 1024;
+/// After responding, how much / how long to drain unread request bytes so the
+/// close is a FIN, not a reset that would discard the response.
+const DRAIN_MAX: usize = 64 * 1024;
+const DRAIN_TIME: Duration = Duration::from_secs(1);
+const DRAIN_READ_TIMEOUT: Duration = Duration::from_millis(100);
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Overall time allowed to receive the request line.
@@ -53,9 +60,12 @@ pub enum Route {
 pub enum Routed {
     /// Serve the route; `head` omits the body.
     Serve(Route, bool),
-    NotFound,
+    /// Unknown path; the flag is HEAD (no body).
+    NotFound(bool),
     MethodNotAllowed,
     BadRequest,
+    /// Request larger than [`REQ_MAX`].
+    TooLarge,
 }
 
 /// Path (query and fragment stripped) to route.
@@ -98,7 +108,7 @@ pub fn route_request(req: &[u8]) -> Routed {
     };
     match route_path(target) {
         Some(r) => Routed::Serve(r, head),
-        None => Routed::NotFound,
+        None => Routed::NotFound(head),
     }
 }
 
@@ -130,7 +140,8 @@ fn text_error(status: &str, extra: &str, head: bool) -> Vec<u8> {
 pub fn handle(routed: Routed, store: &Store, open: Option<&SessionRecord>, now: u64) -> Vec<u8> {
     match routed {
         Routed::BadRequest => text_error("400 Bad Request", "", false),
-        Routed::NotFound => text_error("404 Not Found", "", false),
+        Routed::NotFound(head) => text_error("404 Not Found", "", head),
+        Routed::TooLarge => text_error("431 Request Header Fields Too Large", "", false),
         Routed::MethodNotAllowed => {
             text_error("405 Method Not Allowed", "Allow: GET, HEAD\r\n", false)
         }
@@ -141,14 +152,15 @@ pub fn handle(routed: Routed, store: &Store, open: Option<&SessionRecord>, now: 
             head,
             "",
         ),
-        Routed::Serve(route, head) => match export::build_payload(store, open, now) {
-            Ok(p) => {
+        Routed::Serve(route, head) => match export::Loaded::load(store, open) {
+            Ok(l) => {
+                // Only the requested representation is built.
                 let (ctype, body) = match route {
-                    Route::Sessions => ("application/json; charset=utf-8", &p.json),
-                    Route::Daily => ("application/json; charset=utf-8", &p.daily_json),
-                    _ => ("text/calendar; charset=utf-8", &p.ics),
+                    Route::Sessions => ("application/json; charset=utf-8", l.sessions_json(now)),
+                    Route::Daily => ("application/json; charset=utf-8", l.daily_json(now)),
+                    _ => ("text/calendar; charset=utf-8", l.ics(now)),
                 };
-                response("200 OK", ctype, body, head, "")
+                response("200 OK", ctype, &body, head, "")
             }
             Err(e) => {
                 log::log_line(&format!("http: cannot read sessions: {e}"));
@@ -158,40 +170,101 @@ pub fn handle(routed: Routed, store: &Store, open: Option<&SessionRecord>, now: 
     }
 }
 
-/// Read until the first line is complete, the buffer is full, EOF, a timeout
-/// or the overall deadline. Returns the bytes read.
-fn read_request(stream: &mut TcpStream, buf: &mut [u8; REQ_BUF]) -> usize {
+/// Result of [`read_request`].
+struct Request {
+    /// Bytes stored in the routing buffer.
+    stored: usize,
+    too_large: bool,
+}
+
+/// Read until the end of the headers (`\r\n\r\n` or `\n\n`), EOF, a timeout
+/// or the overall deadline. The first [`REQ_BUF`] bytes are kept for routing;
+/// the rest is read and discarded, up to [`REQ_MAX`] in total.
+fn read_request(stream: &mut TcpStream, req: &mut [u8; REQ_BUF]) -> Request {
     let start = Instant::now();
-    let mut n = 0;
-    while n < buf.len() && start.elapsed() < REQ_DEADLINE {
-        match stream.read(&mut buf[n..]) {
+    let mut chunk = [0u8; 1024];
+    let (mut stored, mut total) = (0usize, 0usize);
+    let (mut state, mut prev) = (0usize, 0u8);
+    const END: [u8; 4] = *b"\r\n\r\n";
+    while let Some(left) = REQ_DEADLINE.checked_sub(start.elapsed()) {
+        let _ = stream.set_read_timeout(Some(READ_TIMEOUT.min(left).max(Duration::from_millis(1))));
+        let k = match stream.read(&mut chunk) {
             Ok(0) | Err(_) => break,
-            Ok(k) => {
-                n += k;
-                if buf[..n].contains(&b'\n') {
-                    break;
-                }
+            Ok(k) => k,
+        };
+        let keep = k.min(REQ_BUF - stored);
+        req[stored..stored + keep].copy_from_slice(&chunk[..keep]);
+        stored += keep;
+        total += k;
+        let mut done = false;
+        for &b in &chunk[..k] {
+            state = if b == END[state] {
+                state + 1
+            } else if b == b'\r' {
+                1
+            } else {
+                0
+            };
+            if state == 4 || (b == b'\n' && prev == b'\n') {
+                done = true;
+                break;
             }
+            prev = b;
+        }
+        if done {
+            break;
+        }
+        if total > REQ_MAX {
+            return Request {
+                stored,
+                too_large: true,
+            };
         }
     }
-    n
+    Request {
+        stored,
+        too_large: false,
+    }
+}
+
+/// Send FIN, then read and discard whatever the client still sends (bounded)
+/// so closing does not reset the connection.
+fn drain(stream: &mut TcpStream) {
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(DRAIN_READ_TIMEOUT));
+    let start = Instant::now();
+    let mut sink = [0u8; 1024];
+    let mut n = 0;
+    while n < DRAIN_MAX && start.elapsed() < DRAIN_TIME {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => n += k,
+        }
+    }
 }
 
 fn serve_one(mut stream: TcpStream, store: &Store, live: &Live) {
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let mut buf = [0u8; REQ_BUF];
-    let n = read_request(&mut stream, &mut buf);
-    if n == 0 {
+    let req = read_request(&mut stream, &mut buf);
+    if req.stored == 0 && !req.too_large {
         return;
     }
-    let routed = route_request(&buf[..n]);
+    let routed = if req.too_large {
+        Routed::TooLarge
+    } else {
+        route_request(&buf[..req.stored])
+    };
     // Lock only to clone.
     let open = live.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let out = handle(routed, store, open.as_ref(), win32::now_utc_secs());
     let _ = stream.write_all(&out);
     let _ = stream.flush();
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    drop(out);
+    if matches!(routed, Routed::Serve(r, _) if r != Route::Index) {
+        win32::trim_working_set();
+    }
+    drain(&mut stream);
 }
 
 /// Accept loop. Blocks forever; run it on its own thread.
@@ -209,6 +282,12 @@ pub fn serve(listener: TcpListener, store: Store, live: Live) {
 /// returned (the caller logs it; tracking continues). The thread is detached
 /// and does not keep the process alive.
 pub fn spawn(port: u16, store: Store, live: Live) -> io::Result<()> {
+    if port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "http_port 0 is not allowed",
+        ));
+    }
     let listener = TcpListener::bind(("0.0.0.0", port))?;
     std::thread::Builder::new()
         .name("http".into())
@@ -245,7 +324,8 @@ mod tests {
             r("HEAD /daily.json?z HTTP/1.1\r\n"),
             Routed::Serve(Route::Daily, true)
         );
-        assert_eq!(r("GET /missing HTTP/1.1\r\n"), Routed::NotFound);
+        assert_eq!(r("GET /missing HTTP/1.1\r\n"), Routed::NotFound(false));
+        assert_eq!(r("HEAD /missing HTTP/1.1\r\n"), Routed::NotFound(true));
         assert_eq!(
             r("POST /sessions.json HTTP/1.1\r\n"),
             Routed::MethodNotAllowed
@@ -271,13 +351,17 @@ mod tests {
     fn error_responses() {
         let dir = std::env::temp_dir().join(format!("gametime-http-unit-{}", std::process::id()));
         let store = Store::open(&dir).unwrap();
-        let nf = text(&handle(Routed::NotFound, &store, None, 0));
+        let nf = text(&handle(Routed::NotFound(false), &store, None, 0));
         assert!(nf.starts_with("HTTP/1.1 404 Not Found\r\n"));
         assert!(nf.contains("Access-Control-Allow-Origin: *\r\n"));
         assert!(nf.contains("Cache-Control: no-store\r\n"));
         let m = text(&handle(Routed::MethodNotAllowed, &store, None, 0));
         assert!(m.starts_with("HTTP/1.1 405 "));
         assert!(m.contains("Allow: GET, HEAD\r\n"));
+        let hn = text(&handle(Routed::NotFound(true), &store, None, 0));
+        assert!(hn.starts_with("HTTP/1.1 404 ") && hn.ends_with("\r\n\r\n"));
+        let t = text(&handle(Routed::TooLarge, &store, None, 0));
+        assert!(t.starts_with("HTTP/1.1 431 "));
         let b = text(&handle(Routed::BadRequest, &store, None, 0));
         assert!(b.starts_with("HTTP/1.1 400 "));
         let h = text(&handle(Routed::Serve(Route::Index, true), &store, None, 0));
