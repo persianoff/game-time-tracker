@@ -385,6 +385,11 @@ mod tests {
         }
     }
 
+    /// `a` is a checkpoint of `b`: same game and start, end and credit not larger.
+    fn is_prefix(a: &Session<char>, b: &Session<char>) -> bool {
+        a.game == b.game && a.start == b.start && a.end <= b.end && a.active_s <= b.active_s
+    }
+
     fn gi(c: char) -> usize {
         (c as u8 - b'a') as usize
     }
@@ -409,6 +414,7 @@ mod tests {
             let mut fg: Option<char> = None;
             let mut now = 10_000u64;
             let mut prev: Option<(u64, Option<char>)> = None;
+            let mut last_snap: Option<Session<char>> = None;
 
             for i in 0..10_000 {
                 if i > 0 {
@@ -441,12 +447,29 @@ mod tests {
                     }
                 }
                 polls.push((now, epoch, fg));
-                if let Some(x) = t.step(now, fg.as_ref()) {
-                    sessions.push((x, tag));
+                let closed = t.step(now, fg.as_ref());
+                if let Some(x) = &closed {
+                    // The snapshot taken before this step is a prefix of the
+                    // session that closes now.
+                    if let Some(snap) = &last_snap {
+                        assert!(is_prefix(snap, x), "seed {seed}: {snap:?} vs {x:?}");
+                    }
+                    sessions.push((x.clone(), tag));
                 }
+                let snap = t.current();
+                if closed.is_none() {
+                    if let Some(old) = &last_snap {
+                        let new = snap.as_ref().expect("snapshot vanished without a close");
+                        assert!(is_prefix(old, new), "seed {seed}: {old:?} vs {new:?}");
+                    }
+                }
+                last_snap = snap;
                 prev = Some((now, fg));
             }
             if let Some(x) = t.flush() {
+                if let Some(snap) = &last_snap {
+                    assert!(is_prefix(snap, &x), "seed {seed}: {snap:?} vs {x:?}");
+                }
                 sessions.push((x, epoch));
             }
 
@@ -479,11 +502,36 @@ mod tests {
                     }
                 }
 
+                // No session spans a poll of a different game, nor an
+                // unfocused run longer than the merge gap.
+                let mut pause_start: Option<u64> = None;
+                for &(tm, e, f) in &polls {
+                    if e != *ex || tm < x.start || tm > x.end {
+                        continue;
+                    }
+                    if tm > x.start && tm < x.end {
+                        assert!(
+                            !matches!(f, Some(h) if h != x.game),
+                            "seed {seed}: {x:?} spans other game at {tm}"
+                        );
+                    }
+                    if f == Some(x.game) {
+                        if let Some(ps) = pause_start.take() {
+                            assert!(
+                                tm - ps <= params.merge_gap_s,
+                                "seed {seed}: {x:?} spans unfocused run {ps}..{tm}"
+                            );
+                        }
+                    } else if pause_start.is_none() && tm > x.start {
+                        pause_start = Some(tm);
+                    }
+                }
+
                 // Same-game neighbours are split only for a legitimate reason.
                 let g = gi(x.game);
                 if let Some((p, ep)) = last_of_game[g] {
                     if ep == ex {
-                        let big_gap = x.start - p.end > params.merge_gap_s;
+                        let big_gap = x.start.saturating_sub(p.end) > params.merge_gap_s;
                         let other = || {
                             polls.iter().any(|&(tm, e, f)| {
                                 e == *ex
