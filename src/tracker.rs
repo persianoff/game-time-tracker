@@ -101,6 +101,12 @@ pub struct Engine {
     export_join_wait_ms: u64,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
+    /// Open-session snapshot for the HTTP endpoint (refreshed on session start, on switch and at checkpoints).
+    live: crate::http::Live,
+    /// Start of the session currently published in `live`.
+    live_key: Option<(String, u64)>,
+    /// Dropped-record count last logged (warn only on change).
+    dropped_logged: usize,
     #[cfg(test)]
     match_calls: u32,
     #[cfg(test)]
@@ -151,6 +157,9 @@ impl Engine {
             export_slow_logged: false,
             export_join_wait_ms: EXPORT_JOIN_WAIT_MS,
             last_seen: 0,
+            live: crate::http::new_live(),
+            live_key: None,
+            dropped_logged: 0,
             #[cfg(test)]
             match_calls: 0,
             #[cfg(test)]
@@ -220,9 +229,50 @@ impl Engine {
         }
 
         self.maybe_checkpoint(now);
+        self.sync_live();
         // Last, so a slow scan never delays a poll's clock reading.
         self.maybe_rescan(now);
         self.maybe_export(now);
+    }
+
+    /// Handle to the open-session snapshot shared with the HTTP thread.
+    pub fn live(&self) -> crate::http::Live {
+        self.live.clone()
+    }
+
+    /// Publish the open session (or `None`) for the HTTP endpoint. A no-op
+    /// unless `http_port` is set. The lock is held only for the swap.
+    fn publish_live(&mut self, rec: Option<SessionRecord>) {
+        if self.cfg.http_port.is_some() {
+            self.live_key = rec.as_ref().map(|r| (r.game.clone(), r.start_utc));
+            *self.live.lock().unwrap_or_else(|e| e.into_inner()) = rec;
+        }
+    }
+
+    /// Publish when the open session starts or changes, and clear once it is
+    /// closed and recorded (not while its append is still pending). Allocates
+    /// only on a change.
+    fn sync_live(&mut self) {
+        if self.cfg.http_port.is_none() {
+            return;
+        }
+        let changed = match (self.tracker.current_key(), &self.live_key) {
+            (Some((g, st)), Some((lg, ls))) => g.name != *lg || st != *ls,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if changed {
+            let rec = self
+                .tracker
+                .current()
+                .map(|s| self.record(&s, String::new()));
+            self.publish_live(rec);
+        } else if self.tracker.current_key().is_none()
+            && self.live_key.is_some()
+            && self.retry.is_empty()
+        {
+            self.publish_live(None);
+        }
     }
 
     /// Close the open session (stop/shutdown) and make a last attempt at any
@@ -341,7 +391,18 @@ impl Engine {
             .current()
             .map(|s| self.record(&s, String::new()));
         let payload = match export::build_payload(&self.store, open.as_ref(), now) {
-            Ok(p) => p,
+            Ok(p) => {
+                if p.dropped != self.dropped_logged {
+                    self.dropped_logged = p.dropped;
+                    if p.dropped > 0 {
+                        log::log_line(&format!(
+                            "warning: {} record(s) with invalid times left out of daily totals",
+                            p.dropped
+                        ));
+                    }
+                }
+                p
+            }
             Err(e) => {
                 self.export_done(Err(e), now);
                 return;
@@ -537,6 +598,14 @@ impl Engine {
         }
         self.last_ckpt = Some(now);
 
+        if self.cfg.http_port.is_some() {
+            // Refresh the open session's totals; never clears (see `sync_live`).
+            if let Some(s) = self.tracker.current() {
+                let rec = self.record(&s, String::new());
+                self.publish_live(Some(rec));
+            }
+        }
+
         if !self.slot_ok {
             self.slot_ok = self.store.checkpoint_slot_free();
         }
@@ -651,7 +720,14 @@ pub fn run(verbose: bool, heal_autostart: bool) -> i32 {
     ));
 
     win32::trim_working_set();
+    let http_port = cfg.http_port;
     let mut engine = Engine::new(cfg, db, detect::scan_system, store, rv.checkpoint_free);
+    if let Some(port) = http_port {
+        match Store::open(&dir).and_then(|s| crate::http::spawn(port, s, engine.live())) {
+            Ok(()) => log::log_line(&format!("http endpoint listening on 0.0.0.0:{port}")),
+            Err(e) => log::log_line(&format!("http endpoint disabled (port {port}): {e}")),
+        }
+    }
     engine.need_recover = !rv.errors.is_empty();
     while !stop.wait(1000) {
         engine.tick(win32::now_utc_secs(), win32::foreground());
@@ -1087,6 +1163,49 @@ mod tests {
     }
 
     #[test]
+    fn live_snapshot_follows_open_session_when_http_enabled() {
+        let d = TempDir::new("live");
+        let cfg = Config {
+            http_port: Some(1),
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        let live = e.live();
+        run_for(&mut e, 1000, 31, || exe(1, ALPHA));
+        assert_eq!(live.lock().unwrap().as_ref().unwrap().game, "Alpha");
+        run_for(&mut e, 1031, 120, || Foreground::None);
+        assert!(live.lock().unwrap().is_none());
+
+        // Disabled: never published.
+        let d2 = TempDir::new("live-off");
+        let mut e2 = engine(&d2, true);
+        run_for(&mut e2, 1000, 40, || exe(1, ALPHA));
+        assert!(e2.live().lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn live_snapshot_published_on_start_and_switch() {
+        let d = TempDir::new("live-switch");
+        let cfg = Config {
+            http_port: Some(1),
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        let live = e.live();
+        // Published well before the first 30 s checkpoint.
+        run_for(&mut e, 1000, 3, || exe(1, ALPHA));
+        assert_eq!(live.lock().unwrap().as_ref().unwrap().game, "Alpha");
+        let start1 = live.lock().unwrap().as_ref().unwrap().start_utc;
+        // Switch to another game: published at once, with a new start.
+        run_for(&mut e, 1003, 5, || exe(2, BETA));
+        let g = live.lock().unwrap().clone().unwrap();
+        assert_ne!(g.game, "Alpha");
+        assert_ne!(g.start_utc, start1);
+    }
+
+    #[test]
     fn checkpoint_cleared_when_nothing_to_snapshot() {
         let d = TempDir::new("ckpt-idle");
         let mut e = engine(&d, true);
@@ -1474,6 +1593,31 @@ mod tests {
         run_for(&mut e, 1080, 15, || Foreground::None);
         assert!(e.retry.is_empty());
         assert_eq!(records(&d).len(), 1);
+    }
+
+    #[test]
+    fn live_snapshot_stays_while_append_pending() {
+        let d = TempDir::new("live-pending");
+        let cfg = Config {
+            http_port: Some(1),
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        let live = e.live();
+        fs::create_dir(d.0.join("sessions.jsonl")).unwrap();
+        run_for(&mut e, 1000, 10, || exe(1, ALPHA));
+        // Closes at ~1070; append fails and is queued. Run across a checkpoint.
+        run_for(&mut e, 1010, 70, || Foreground::None);
+        assert_eq!(e.retry.len(), 1);
+        run_for(&mut e, 1080, 40, || Foreground::None);
+        assert!(!e.retry.is_empty());
+        assert_eq!(live.lock().unwrap().as_ref().unwrap().game, "Alpha");
+        // Append recovers: the snapshot clears.
+        fs::remove_dir(d.0.join("sessions.jsonl")).unwrap();
+        run_for(&mut e, 1120, 20, || Foreground::None);
+        assert!(e.retry.is_empty());
+        assert!(live.lock().unwrap().is_none());
     }
 
     #[test]

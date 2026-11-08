@@ -98,6 +98,29 @@ pub fn split_by_local_day(rec: &SessionRecord, offset: impl Fn(u64) -> i32) -> V
     out
 }
 
+/// A record whose times are usable: both lie within years 1970..=9999. Invalid
+/// records are skipped by [`daily`] and [`split_by_local_day`].
+pub fn is_valid(rec: &SessionRecord) -> bool {
+    rec.start_utc <= MAX_UTC && rec.end_utc <= MAX_UTC
+}
+
+/// [`daily`], also returning how many records were dropped as invalid.
+pub fn daily_checked<'a>(
+    records: impl IntoIterator<Item = &'a SessionRecord>,
+    offset: impl Fn(u64) -> i32,
+) -> (Daily, usize) {
+    let mut dropped = 0;
+    let d = daily(
+        records.into_iter().inspect(|r| {
+            if !is_valid(r) {
+                dropped += 1;
+            }
+        }),
+        offset,
+    );
+    (d, dropped)
+}
+
 /// Aggregate records into per-(day, game) active seconds, skipping zeros.
 pub fn daily<'a>(
     records: impl IntoIterator<Item = &'a SessionRecord>,
@@ -326,6 +349,17 @@ mod tests {
         assert_eq!(p.iter().map(|x| x.1).sum::<u64>(), 1000);
         // Constant huge negative offset: next_boundary lands after `cur`.
         assert_eq!(next_boundary(D0, day_index(D0, &|_| 0), &|_| 0), D0 + DAY);
+    }
+
+    #[test]
+    fn validity_and_dropped_count() {
+        let ok = rec("A", 1000, 1100, 100);
+        let bad = rec("B", 1_700_000_000_000, 1_700_000_100_000, 100);
+        assert!(is_valid(&ok));
+        assert!(!is_valid(&bad));
+        let (d, dropped) = daily_checked([&ok, &bad], |_| 0);
+        assert_eq!(dropped, 1);
+        assert_eq!(d.len(), 1);
     }
 
     #[test]

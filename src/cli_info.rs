@@ -260,15 +260,21 @@ pub fn build_status(
     offset: impl Fn(u64) -> i32 + Copy,
     data_dir: &Path,
 ) -> StatusData {
-    // Unrecovered sessions (checkpoint and pending files) count too, unless
-    // the log already holds the same (game, start_utc).
+    // Unrecovered sessions (checkpoint and pending files) count too. On the
+    // same (game, start_utc) as a logged record, the larger `end_utc` wins
+    // (as in `Store::load_all_with_stats`).
     let mut all: Vec<&SessionRecord> = records.iter().collect();
     for c in checkpoint.into_iter().chain(pending) {
-        if !all
+        match all
             .iter()
-            .any(|r| r.game == c.game && r.start_utc == c.start_utc)
+            .position(|r| r.game == c.game && r.start_utc == c.start_utc)
         {
-            all.push(c);
+            Some(i) => {
+                if c.end_utc > all[i].end_utc {
+                    all[i] = c;
+                }
+            }
+            None => all.push(c),
         }
     }
     let daily = stats::daily(all, offset);
@@ -472,6 +478,37 @@ mod tests {
             end_utc: end,
             active_s: active,
         }
+    }
+
+    #[test]
+    fn build_status_dedupe_keeps_larger_end() {
+        let d0 = 20463 * 86400u64;
+        let now = d0 + 12 * 3600;
+        let logged = vec![rec("A", d0 + 3600, d0 + 3700, 100)];
+        let longer = rec("A", d0 + 3600, d0 + 7200, 3600);
+        let s = build_status(
+            &logged,
+            Some(&longer),
+            &[],
+            0,
+            true,
+            now,
+            |_| 0,
+            Path::new("D"),
+        );
+        assert_eq!(s.week[0].total_s, 3600);
+        let shorter = rec("A", d0 + 3600, d0 + 3650, 50);
+        let s = build_status(
+            &logged,
+            Some(&shorter),
+            &[],
+            0,
+            true,
+            now,
+            |_| 0,
+            Path::new("D"),
+        );
+        assert_eq!(s.week[0].total_s, 100);
     }
 
     #[test]

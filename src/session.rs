@@ -151,6 +151,14 @@ impl<G: Clone + PartialEq> Tracker<G> {
         self.open.is_none()
     }
 
+    /// Game and start of the session [`Tracker::current`] would return (no allocation).
+    pub fn current_key(&self) -> Option<(&G, u64)> {
+        self.open
+            .as_ref()
+            .filter(|o| o.active_s > 0)
+            .map(|o| (&o.game, o.start))
+    }
+
     /// Snapshot of the open or paused session (for checkpointing), with `end` at
     /// the last credited time. It is always a prefix of the session that will
     /// eventually close. `None` if idle or nothing has been credited yet.
