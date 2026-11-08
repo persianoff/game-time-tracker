@@ -103,7 +103,7 @@ pub struct Engine {
     last_seen: u64,
     /// Open-session snapshot for the HTTP endpoint (refreshed on session start, on switch and at checkpoints).
     live: crate::http::Live,
-    /// Start of the session currently published in `live`.
+    /// Game and start of the session currently published in `live`.
     live_key: Option<(String, u64)>,
     /// Dropped-record count last logged (warn only on change).
     dropped_logged: usize,

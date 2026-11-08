@@ -518,7 +518,8 @@ static XBOX_CACHE: std::sync::Mutex<Option<XboxCache>> = std::sync::Mutex::new(N
 /// Returns `(drives, full_sweep)`.
 fn xbox_plan(cache: Option<&XboxCache>, now: u64, fixed: &[String]) -> (Vec<String>, bool) {
     match cache {
-        Some(c) if now.saturating_sub(c.last_sweep) < XBOX_FULL_SWEEP_S => {
+        // `now < last_sweep` (clock stepped back) falls through: sweep now.
+        Some(c) if now >= c.last_sweep && now - c.last_sweep < XBOX_FULL_SWEEP_S => {
             (c.drives.clone(), false)
         }
         _ => (fixed.to_vec(), true),
@@ -1111,7 +1112,10 @@ mod tests {
             .unwrap()
             .is_empty());
         // implausible count: falls to the layout-(b) reading, never panics
-        let _ = parse_gaming_root(&gaming_root(0, 1_000_000, &["A"]));
+        assert_eq!(
+            parse_gaming_root(&gaming_root(0, 1_000_000, &["A"])),
+            Some(vec![])
+        );
         // unsafe entries dropped, other version tolerated
         let d = gaming_root(7, 4, &["..\\x", "C:\\x", "\\x", "Ok/Sub"]);
         assert_eq!(parse_gaming_root(&d).unwrap(), vec!["Ok\\Sub"]);
@@ -1166,6 +1170,8 @@ mod tests {
         // sweep due
         let now = 1000 + XBOX_FULL_SWEEP_S;
         assert_eq!(xbox_plan(Some(&c), now, &fixed), (fixed.clone(), true));
+        // backward clock jump: sweep is due
+        assert_eq!(xbox_plan(Some(&c), 500, &fixed), (fixed.clone(), true));
         // merge new drives on a full sweep; vanished ones drop out
         let c2 = xbox_update(Some(c.clone()), drives(&["D:\\", "E:\\"]), true, now);
         assert_eq!(c2.drives, drives(&["D:\\", "E:\\"]));
