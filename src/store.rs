@@ -187,22 +187,26 @@ impl Store {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Sorted `current.*.pending.json` paths.
+    fn pending_files(&self) -> io::Result<Vec<PathBuf>> {
+        let mut v = Vec::new();
+        for entry in fs::read_dir(&self.dir)?.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("current.") && name.ends_with(".pending.json") {
+                v.push(entry.path());
+            }
+        }
+        v.sort();
+        Ok(v)
+    }
+
     /// Read-only: sessions in `current.*.pending.json` files that recovery has
     /// not yet merged into the log. Unreadable files are skipped.
     pub fn load_pending(&self) -> Vec<SessionRecord> {
-        let Ok(rd) = fs::read_dir(&self.dir) else {
+        let Ok(paths) = self.pending_files() else {
             return Vec::new();
         };
-        let mut paths: Vec<PathBuf> = rd
-            .flatten()
-            .filter(|e| {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                n.starts_with("current.") && n.ends_with(".pending.json")
-            })
-            .map(|e| e.path())
-            .collect();
-        paths.sort();
         paths
             .iter()
             .filter_map(|p| serde_json::from_slice(&fs::read(p).ok()?).ok())
@@ -245,24 +249,12 @@ impl Store {
 
         // If the directory listing or the log is unavailable, pending files are
         // skipped but current.json is still protected below.
-        let mut pending = Vec::new();
         let mut listing_ok = true;
-        match fs::read_dir(&self.dir) {
-            Ok(rd) => {
-                for entry in rd.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("current.") && name.ends_with(".pending.json") {
-                        pending.push(entry.path());
-                    }
-                }
-                pending.sort();
-            }
-            Err(e) => {
-                listing_ok = false;
-                out.errors.push(e);
-            }
-        }
+        let pending = self.pending_files().unwrap_or_else(|e| {
+            listing_ok = false;
+            out.errors.push(e);
+            Vec::new()
+        });
         let mut log = match self.load_all_with_stats() {
             Ok((log, _)) => Some(log),
             Err(e) => {
@@ -309,20 +301,10 @@ impl Store {
             errors: Vec::new(),
         };
         self.remove_orphan_tmp();
-        let mut pending = Vec::new();
-        match fs::read_dir(&self.dir) {
-            Ok(rd) => {
-                for entry in rd.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("current.") && name.ends_with(".pending.json") {
-                        pending.push(entry.path());
-                    }
-                }
-                pending.sort();
-            }
-            Err(e) => out.errors.push(e),
-        }
+        let pending = self.pending_files().unwrap_or_else(|e| {
+            out.errors.push(e);
+            Vec::new()
+        });
         if !pending.is_empty() {
             match self.load_all_with_stats() {
                 Ok((mut log, _)) => {
