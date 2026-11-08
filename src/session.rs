@@ -146,6 +146,11 @@ impl<G: Clone + PartialEq> Tracker<G> {
         closed
     }
 
+    /// True if there is no open or paused session.
+    pub fn is_idle(&self) -> bool {
+        self.open.is_none()
+    }
+
     /// Snapshot of the open or paused session (for checkpointing), with `end` at
     /// the last credited time. It is always a prefix of the session that will
     /// eventually close. `None` if idle or nothing has been credited yet.

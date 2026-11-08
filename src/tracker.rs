@@ -25,6 +25,9 @@ const RESCAN_EVERY_S: u64 = 30 * 60;
 const MAX_APPEND_ATTEMPTS: u8 = 6;
 /// Seconds between append retries.
 const RETRY_EVERY_S: u64 = 10;
+/// Backoff for `recover()` while the checkpoint slot stays busy.
+const RECOVER_WAIT_MIN_S: u64 = 30;
+const RECOVER_WAIT_MAX_S: u64 = 600;
 /// At most this many closed sessions wait for an append retry.
 const MAX_RETRY_SLOTS: usize = 8;
 /// Bound on the set of access-denied pids that were already logged.
@@ -64,14 +67,21 @@ pub struct Engine {
     retry: Vec<PendingAppend>,
     /// It is safe to write `current.json` (no unrecovered file in the way).
     slot_ok: bool,
-    /// We wrote a checkpoint that is still on disk.
-    has_ckpt: bool,
+    /// The session whose prefix we last wrote to `current.json` (game, start).
+    ckpt: Option<(GameKey, u64)>,
+    /// Current wait between `recover()` calls while the slot stays busy.
+    recover_wait: u64,
+    next_recover: u64,
+    /// The last recover() reported errors (e.g. pending files): try again.
+    need_recover: bool,
     last_ckpt: Option<u64>,
     last_scan: Option<u64>,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
     #[cfg(test)]
     match_calls: u32,
+    #[cfg(test)]
+    recover_calls: u32,
 }
 
 impl Engine {
@@ -98,12 +108,17 @@ impl Engine {
             exe: None,
             retry: Vec::new(),
             slot_ok: checkpoint_free,
-            has_ckpt: false,
+            ckpt: None,
+            recover_wait: RECOVER_WAIT_MIN_S,
+            next_recover: 0,
+            need_recover: false,
             last_ckpt: None,
             last_scan: None,
             last_seen: 0,
             #[cfg(test)]
             match_calls: 0,
+            #[cfg(test)]
+            recover_calls: 0,
         }
     }
 
@@ -113,13 +128,12 @@ impl Engine {
         if !self.retry.is_empty() {
             self.retry_appends(now, false);
         }
-        self.maybe_rescan(now);
 
         let have_game = match fg {
-            Foreground::None => false,
+            Foreground::None | Foreground::Unknown(_) => false,
             Foreground::Denied(pid) => {
                 if !self.denied.contains(&pid) {
-                    log::log_line(&format!("access denied querying foreground pid {pid}"));
+                    log::log_line(&format!("access denied opening foreground pid {pid}"));
                     if self.denied.len() >= MAX_DENIED_PIDS {
                         self.denied.clear();
                     }
@@ -165,8 +179,13 @@ impl Engine {
             let exe = closed_exe.map(|(_, e)| e).unwrap_or_default();
             self.commit(sess, exe, now);
         }
+        if self.tracker.is_idle() {
+            self.exe = None;
+        }
 
         self.maybe_checkpoint(now);
+        // Last, so a slow scan never delays a poll's clock reading.
+        self.maybe_rescan(now);
     }
 
     /// Close the open session (stop/shutdown) and make a last attempt at any
@@ -194,47 +213,70 @@ impl Engine {
 
     fn commit(&mut self, sess: Session<GameKey>, exe: String, now: u64) {
         let rec = self.record(&sess, exe);
-        match self.store.close_session(&rec) {
-            Ok(()) => {
-                self.has_ckpt = false;
-                self.slot_ok = true;
-                log::log_line(&format!(
-                    "session closed: {} {}s active",
-                    rec.game, rec.active_s
-                ));
-            }
-            Err(CloseError::Clear(e)) => {
-                // Recorded; never re-append. recover() removes the leftover.
-                log::log_line(&format!("session {} recorded, but {e}", rec.game));
-                self.has_ckpt = false;
-                self.slot_ok = false;
-            }
-            Err(CloseError::Append(e)) => {
-                log::log_line(&format!("append failed for {} ({e}); will retry", rec.game));
-                // The checkpoint still holds a prefix of this session: let
-                // recover() absorb it instead of overwriting it.
-                self.slot_ok = false;
-                if self.retry.len() >= MAX_RETRY_SLOTS {
-                    let lost = self.retry.remove(0);
+        let owns = self.slot_ok
+            && matches!(&self.ckpt, Some((g, st)) if *g == sess.game && *st == sess.start);
+        if owns {
+            match self.store.close_session(&rec) {
+                Ok(()) => {
+                    self.ckpt = None;
                     log::log_line(&format!(
-                        "retry queue full, dropping {} start={}: {}",
-                        lost.rec.game,
-                        lost.rec.start_utc,
-                        serde_json::to_string(&lost.rec).unwrap_or_default()
+                        "session closed: {} {}s active",
+                        rec.game, rec.active_s
                     ));
                 }
-                self.retry.push(PendingAppend {
-                    rec,
-                    attempts: 1,
-                    next_at: now + RETRY_EVERY_S,
-                });
+                Err(CloseError::Clear(e)) => {
+                    // Recorded; never re-append. recover() removes the leftover.
+                    log::log_line(&format!("session {} recorded, but {e}", rec.game));
+                    self.ckpt = None;
+                    self.slot_ok = false;
+                }
+                Err(CloseError::Append(e)) => {
+                    log::log_line(&format!("append failed for {} ({e}); will retry", rec.game));
+                    // current.json still holds a prefix of this session: leave
+                    // it for recover() instead of overwriting it.
+                    self.ckpt = None;
+                    self.slot_ok = false;
+                    self.queue_retry(rec, now);
+                }
+            }
+        } else {
+            // The checkpoint file (if any) is not this session's: never touch it.
+            match self.store.append(&rec) {
+                Ok(()) => log::log_line(&format!(
+                    "session closed: {} {}s active",
+                    rec.game, rec.active_s
+                )),
+                Err(e) => {
+                    log::log_line(&format!("append failed for {} ({e}); will retry", rec.game));
+                    self.queue_retry(rec, now);
+                }
             }
         }
+    }
+
+    fn queue_retry(&mut self, rec: SessionRecord, now: u64) {
+        if self.retry.len() >= MAX_RETRY_SLOTS {
+            let lost = self.retry.remove(0);
+            log::log_line(&format!(
+                "retry queue full, dropping {} start={}: {}",
+                lost.rec.game,
+                lost.rec.start_utc,
+                serde_json::to_string(&lost.rec).unwrap_or_default()
+            ));
+        }
+        self.retry.push(PendingAppend {
+            rec,
+            attempts: 1,
+            next_at: now + RETRY_EVERY_S,
+        });
     }
 
     fn retry_appends(&mut self, now: u64, force: bool) {
         let mut pending = std::mem::take(&mut self.retry);
         for mut p in pending.drain(..) {
+            if p.next_at > now + RETRY_EVERY_S {
+                p.next_at = now + RETRY_EVERY_S; // clock went backwards
+            }
             if !force && now < p.next_at {
                 self.retry.push(p);
                 continue;
@@ -265,13 +307,43 @@ impl Engine {
         match self.last_scan {
             None => self.last_scan = Some(now),
             Some(t) if now < t => self.last_scan = Some(now),
-            Some(t) if now - t >= RESCAN_EVERY_S => {
+            // Defer while a session is open or paused: a slow scan (offline
+            // drive) must not look like a sleep gap and split the session.
+            Some(t) if now - t >= RESCAN_EVERY_S && self.tracker.is_idle() => {
                 self.last_scan = Some(now);
                 self.db = (self.scan)(&self.cfg);
                 self.cache = None;
                 log::log_line(&format!("rescan: {} games", self.db.games().len()));
+                win32::trim_working_set();
             }
             _ => {}
+        }
+    }
+
+    /// Run `recover()`; back off while it keeps failing (busy slot or pending
+    /// files that still cannot be appended).
+    fn run_recover(&mut self, now: u64) {
+        #[cfg(test)]
+        {
+            self.recover_calls += 1;
+        }
+        let rv = self.store.recover();
+        for r in &rv.recovered {
+            log::log_line(&format!(
+                "recovered session {} start={}",
+                r.game, r.start_utc
+            ));
+        }
+        for e in &rv.errors {
+            log::log_line(&format!("recover error: {e}"));
+        }
+        self.slot_ok = rv.checkpoint_free;
+        self.need_recover = !rv.errors.is_empty();
+        if self.slot_ok && !self.need_recover {
+            self.recover_wait = RECOVER_WAIT_MIN_S;
+        } else {
+            self.next_recover = now + self.recover_wait;
+            self.recover_wait = (self.recover_wait * 2).min(RECOVER_WAIT_MAX_S);
         }
     }
 
@@ -295,18 +367,13 @@ impl Engine {
         if !self.slot_ok {
             self.slot_ok = self.store.checkpoint_slot_free();
         }
-        if !self.slot_ok {
-            let rv = self.store.recover();
-            for r in &rv.recovered {
-                log::log_line(&format!(
-                    "recovered session {} start={}",
-                    r.game, r.start_utc
-                ));
+        if !self.slot_ok || self.need_recover {
+            if self.next_recover > now + RECOVER_WAIT_MAX_S {
+                self.next_recover = now; // clock went backwards
             }
-            for e in &rv.errors {
-                log::log_line(&format!("recover error: {e}"));
+            if now >= self.next_recover {
+                self.run_recover(now);
             }
-            self.slot_ok = rv.checkpoint_free;
             if !self.slot_ok {
                 return;
             }
@@ -325,12 +392,12 @@ impl Engine {
                     res = self.store.write_checkpoint(&rec);
                 }
                 match res {
-                    Ok(()) => self.has_ckpt = true,
+                    Ok(()) => self.ckpt = Some((sess.game.clone(), sess.start)),
                     Err(e) => log::log_line(&format!("checkpoint write failed: {e}")),
                 }
             }
-            None if self.has_ckpt => match self.store.clear_checkpoint() {
-                Ok(()) => self.has_ckpt = false,
+            None if self.ckpt.is_some() => match self.store.clear_checkpoint() {
+                Ok(()) => self.ckpt = None,
                 Err(e) => log::log_line(&format!("checkpoint clear failed: {e}")),
             },
             None => {}
@@ -354,7 +421,7 @@ pub fn run(verbose: bool) -> i32 {
     };
     log::init(&dir, verbose);
     std::panic::set_hook(Box::new(|info| {
-        log::log_line(&format!("panic: {info}"));
+        log::try_log_line(&format!("panic: {info}"));
     }));
 
     let cfg = match Config::load_or_create(&dir) {
@@ -402,7 +469,9 @@ pub fn run(verbose: bool) -> i32 {
         per_source
     ));
 
+    win32::trim_working_set();
     let mut engine = Engine::new(cfg, db, detect::scan_system, store, rv.checkpoint_free);
+    engine.need_recover = !rv.errors.is_empty();
     while !stop.wait(1000) {
         engine.tick(win32::now_utc_secs(), win32::foreground());
     }
@@ -416,7 +485,6 @@ mod tests {
     use super::*;
     use crate::detect::Game;
     use std::fs;
-    use std::path::Path;
 
     struct TempDir(PathBuf);
 
@@ -610,7 +678,7 @@ mod tests {
         assert_eq!(s.load_checkpoint().unwrap().game, "Old");
         drop(h);
         // Once released, a later checkpoint tick recovers and then writes.
-        run_for(&mut e, 1065, 31, || exe(1, ALPHA));
+        run_for(&mut e, 1065, 70, || exe(1, ALPHA));
         assert_eq!(s.load_checkpoint().unwrap().game, "Alpha");
         let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
         assert_eq!(names, vec!["Old"]);
@@ -666,23 +734,201 @@ mod tests {
         assert_eq!(e.match_calls, 3);
     }
 
+    static SCANS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn scan_counting(cfg: &Config) -> GameDb {
+        SCANS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        scan_fake(cfg)
+    }
+
     #[test]
-    fn rescan_keeps_open_session() {
+    fn rescan_deferred_while_playing_then_runs_when_idle() {
+        use std::sync::atomic::Ordering::SeqCst;
         let d = TempDir::new("rescan");
-        let mut e = engine(&d, true);
-        run_for(&mut e, 1000, 10, || exe(1, ALPHA));
-        // Jump the clock is not allowed (sleep gap); tick through the interval.
-        let mut t = 1010;
-        while t < 1000 + RESCAN_EVERY_S + 20 {
-            e.tick(t, exe(1, ALPHA));
-            t += 1;
-        }
-        assert!(e.last_scan.unwrap() >= 1000 + RESCAN_EVERY_S);
+        let cfg = Config::default();
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_counting, Store::open(&d.0).unwrap(), true);
+        let before = SCANS.load(SeqCst);
+        run_for(&mut e, 1000, RESCAN_EVERY_S + 20, || exe(1, ALPHA));
+        assert_eq!(SCANS.load(SeqCst), before, "deferred while playing");
         assert!(records(&d).is_empty(), "session must stay open");
-        e.shutdown();
+        // Focus lost; once the merge gap expires the tracker is idle and the
+        // deferred rescan runs. The session is still intact.
+        run_for(&mut e, 1000 + RESCAN_EVERY_S + 20, 100, || Foreground::None);
+        assert_eq!(SCANS.load(SeqCst), before + 1);
         let r = records(&d);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].start_utc, 1000);
+    }
+
+    #[test]
+    fn foreign_checkpoint_survives_direct_switch_and_is_recovered() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = TempDir::new("foreign");
+        let s = Store::open(&d.0).unwrap();
+        let old = SessionRecord {
+            game: "Old".into(),
+            source: "gog".into(),
+            exe: "x".into(),
+            start_utc: 5,
+            end_utc: 50,
+            active_s: 45,
+        };
+        s.write_checkpoint(&old).unwrap();
+        let h = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(d.0.join("current.json"))
+            .unwrap();
+        let mut e = engine(&d, false);
+        run_for(&mut e, 1000, 10, || exe(1, ALPHA));
+        run_for(&mut e, 1010, 5, || exe(2, BETA)); // direct switch closes Alpha
+        assert_eq!(s.load_checkpoint().unwrap().game, "Old");
+        assert!(records(&d).iter().any(|r| r.game == "Alpha"));
+        drop(h);
+        run_for(&mut e, 1015, 200, || exe(2, BETA));
+        let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
+        assert!(names.contains(&"Old".to_string()), "{names:?}");
+        assert!(names.contains(&"Alpha".to_string()));
+    }
+
+    #[test]
+    fn commit_without_ownership_never_touches_checkpoint() {
+        let d = TempDir::new("own");
+        let s = Store::open(&d.0).unwrap();
+        let prefix = SessionRecord {
+            game: "Alpha".into(),
+            source: "steam".into(),
+            exe: "x".into(),
+            start_utc: 1000,
+            end_utc: 1030,
+            active_s: 30,
+        };
+        s.write_checkpoint(&prefix).unwrap();
+        let mut e = engine(&d, false); // S1 failed earlier: slot not ours
+        let sess = Session {
+            game: GameKey {
+                name: "Beta".into(),
+                source: Source::Epic,
+            },
+            start: 1200,
+            end: 1210,
+            active_s: 10,
+        };
+        e.commit(sess, "b.exe".into(), 1210);
+        assert_eq!(s.load_checkpoint().unwrap(), prefix);
+        assert_eq!(records(&d).len(), 1);
+        // Even with slot_ok set, a non-matching checkpoint owner is not cleared.
+        e.slot_ok = true;
+        e.ckpt = Some((
+            GameKey {
+                name: "Alpha".into(),
+                source: Source::Steam,
+            },
+            1000,
+        ));
+        let sess2 = Session {
+            game: GameKey {
+                name: "Beta".into(),
+                source: Source::Epic,
+            },
+            start: 1300,
+            end: 1310,
+            active_s: 10,
+        };
+        e.commit(sess2, "b.exe".into(), 1310);
+        assert_eq!(s.load_checkpoint().unwrap(), prefix);
+        assert_eq!(records(&d).len(), 2);
+    }
+
+    #[test]
+    fn failed_session_prefix_is_recoverable_after_retries_give_up() {
+        let d = TempDir::new("prefix");
+        let mut e = engine(&d, true);
+        fs::create_dir(d.0.join("sessions.jsonl")).unwrap();
+        run_for(&mut e, 1000, 40, || exe(1, ALPHA)); // checkpoint at 1030
+        run_for(&mut e, 1040, 130, || Foreground::None); // S1 closes, append fails
+        fs::remove_dir(d.0.join("sessions.jsonl")).unwrap();
+        // Retries may already have given up; either way S2 must not delete S1's
+        // prefix, and recover() must absorb it.
+        run_for(&mut e, 1170, 10, || exe(2, BETA));
+        run_for(&mut e, 1180, 200, || Foreground::None);
+        let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
+        assert!(names.contains(&"Alpha".to_string()), "{names:?}");
+        assert!(names.contains(&"Beta".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn recover_backs_off_while_slot_busy_and_resets() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = TempDir::new("backoff");
+        let s = Store::open(&d.0).unwrap();
+        let old = SessionRecord {
+            game: "Old".into(),
+            source: "gog".into(),
+            exe: "x".into(),
+            start_utc: 5,
+            end_utc: 50,
+            active_s: 45,
+        };
+        s.write_checkpoint(&old).unwrap();
+        let h = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(d.0.join("current.json"))
+            .unwrap();
+        let mut e = engine(&d, false);
+        run_for(&mut e, 1000, 301, || Foreground::None);
+        // Attempts at 1030, 1060, 1120, 1240 instead of every 30 s.
+        assert_eq!(e.recover_calls, 4);
+        assert_eq!(e.recover_wait, 480);
+        drop(h);
+        run_for(&mut e, 1301, 250, || Foreground::None);
+        assert_eq!(e.recover_wait, RECOVER_WAIT_MIN_S);
+        assert!(records(&d).iter().any(|r| r.game == "Old"));
+    }
+
+    #[test]
+    fn retry_timer_recovers_from_backwards_clock() {
+        let d = TempDir::new("retry-clock");
+        let mut e = engine(&d, true);
+        let rec = SessionRecord {
+            game: "A".into(),
+            source: "steam".into(),
+            exe: String::new(),
+            start_utc: 1,
+            end_utc: 5,
+            active_s: 4,
+        };
+        e.retry.push(PendingAppend {
+            rec,
+            attempts: 1,
+            next_at: 1_000_000,
+        });
+        e.tick(100, Foreground::None);
+        assert_eq!(e.retry.len(), 1);
+        assert_eq!(e.retry[0].next_at, 100 + RETRY_EVERY_S);
+        e.tick(100 + RETRY_EVERY_S, Foreground::None);
+        assert!(e.retry.is_empty());
+        assert_eq!(records(&d).len(), 1);
+    }
+
+    #[test]
+    fn exe_is_cleared_when_idle() {
+        let d = TempDir::new("execlear");
+        let mut e = engine(&d, true);
+        run_for(&mut e, 1000, 10, || exe(1, ALPHA));
+        assert!(e.exe.is_some());
+        run_for(&mut e, 1010, 100, || Foreground::None);
+        assert!(e.exe.is_none());
+    }
+
+    #[test]
+    fn unknown_is_not_added_to_denied_set() {
+        let d = TempDir::new("unknown");
+        let mut e = engine(&d, true);
+        e.tick(1000, Foreground::Unknown(5));
+        assert!(e.denied.is_empty());
     }
 
     #[test]
@@ -764,6 +1010,5 @@ mod tests {
                 source: Source::Epic
             }
         );
-        let _ = Path::new("");
     }
 }

@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
-    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE, SYSTEMTIME, WAIT_FAILED, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE,
+    SYSTEMTIME, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
@@ -17,8 +18,9 @@ use windows_sys::Win32::System::Registry::{
     KEY_SET_VALUE, KEY_WOW64_64KEY, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, ResetEvent,
-    SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateEventW, CreateMutexW, GetCurrentProcess, OpenEventW, OpenProcess,
+    QueryFullProcessImageNameW, ResetEvent, SetEvent, SetProcessWorkingSetSize,
+    WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::System::Time::SystemTimeToTzSpecificLocalTime;
 use windows_sys::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath};
@@ -48,8 +50,10 @@ impl Drop for OwnedHandle {
 pub enum Foreground {
     /// No foreground window (lock screen, desktop switch, ...).
     None,
-    /// The process could not be opened or queried (access denied, protected).
+    /// The process could not be opened: access denied (protected process).
     Denied(u32),
+    /// Opening or querying failed for another reason (e.g. the process exited).
+    Unknown(u32),
     Exe {
         pid: u32,
         path: PathBuf,
@@ -72,7 +76,11 @@ pub fn foreground() -> Foreground {
         }
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if h.is_null() {
-            return Foreground::Denied(pid);
+            return if GetLastError() == ERROR_ACCESS_DENIED {
+                Foreground::Denied(pid)
+            } else {
+                Foreground::Unknown(pid)
+            };
         }
         let h = OwnedHandle(h);
         // Common case: the path fits a stack buffer, no allocation.
@@ -93,8 +101,14 @@ pub fn foreground() -> Foreground {
             }
             cap *= 2;
         }
-        Foreground::Denied(pid)
+        Foreground::Unknown(pid)
     }
+}
+
+/// Trim the process working set (drops pages that can be re-faulted on demand).
+pub fn trim_working_set() {
+    // SAFETY: -1/-1 is the documented way to empty the current process's set.
+    unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
 }
 
 /// Pid and full image path of the foreground window's process.
@@ -636,6 +650,11 @@ mod tests {
     fn roaming_appdata_exists() {
         let p = roaming_appdata().unwrap();
         assert!(p.is_absolute() && p.is_dir());
+    }
+
+    #[test]
+    fn trim_working_set_runs() {
+        trim_working_set();
     }
 
     #[test]

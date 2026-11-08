@@ -42,6 +42,19 @@ pub fn log_line(msg: &str) {
     }
 }
 
+/// Like [`log_line`] but never blocks: the line is dropped if the logger is
+/// busy (used from the panic hook, which may run while the lock is held).
+pub fn try_log_line(msg: &str) {
+    let mut guard = match LOGGER.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if let Some(l) = guard.as_mut() {
+        l.write(crate::win32::now_utc_secs(), msg);
+    }
+}
+
 fn sanitize(msg: &str) -> String {
     msg.replace(['\n', '\r'], " ")
 }
