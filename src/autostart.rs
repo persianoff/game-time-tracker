@@ -113,6 +113,13 @@ fn self_heal_in(keys: Keys, cfg: &Config, exe: &Path) -> io::Result<Heal> {
     Ok(Heal::Rewritten)
 }
 
+/// Only the real tracker binary may register itself in the Run key.
+pub fn should_heal(exe: &Path) -> bool {
+    exe.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case(TRACKER_EXE))
+}
+
 /// Called from the tracker after config load. Logs the outcome.
 pub fn self_heal(cfg: &Config) {
     let exe = match std::env::current_exe() {
@@ -122,6 +129,10 @@ pub fn self_heal(cfg: &Config) {
             return;
         }
     };
+    if !should_heal(&exe) {
+        log::log_line("autostart: not the tracker binary; skipping self-heal");
+        return;
+    }
     match self_heal_in(REAL_KEYS, cfg, &exe) {
         Ok(Heal::Skipped) => log::log_line("autostart: disabled in config; not registering"),
         Ok(Heal::Ok) => log::log_line("autostart: Run entry ok"),
@@ -158,6 +169,7 @@ fn spawn_detached(tracker: &Path) -> io::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     std::process::Command::new(tracker)
+        .current_dir(tracker.parent().unwrap_or(Path::new(".")))
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -248,6 +260,36 @@ mod tests {
     use windows_sys::Win32::System::Registry::{
         RegDeleteTreeW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_BINARY,
     };
+
+    #[test]
+    fn should_heal_only_for_tracker_exe() {
+        assert!(should_heal(Path::new(r"C:\x\gametime-tracker.exe")));
+        assert!(should_heal(Path::new(r"C:\x\GameTime-Tracker.EXE")));
+        assert!(!should_heal(Path::new(r"C:\x\gametime.exe")));
+        assert!(!should_heal(Path::new(r"C:\x\gametime-0a1b2c3d.exe")));
+        assert!(!should_heal(Path::new("")));
+    }
+
+    #[test]
+    fn cli_rejects_bad_args() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(cli(&a(&["autostart"])), 2);
+        assert_eq!(cli(&a(&["autostart", "bogus"])), 2);
+        assert_eq!(cli(&a(&["autostart", "on", "extra"])), 2);
+        assert_eq!(cli(&a(&["autostart", "status", "--x"])), 2);
+    }
+
+    #[test]
+    fn path_match_is_case_insensitive() {
+        let t = TestKeys::new("case");
+        enable_in(t.keys(), Path::new(r"C:GamesGameTimegametime-tracker.exe")).unwrap();
+        let st = status_in(
+            t.keys(),
+            Path::new(r"c:gamesgametimeGAMETIME-TRACKER.EXE"),
+            true,
+        );
+        assert!(st.matches);
+    }
 
     #[test]
     fn parse_approved() {

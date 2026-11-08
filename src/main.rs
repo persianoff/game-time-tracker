@@ -35,7 +35,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             let verbose = args.len() > 1;
-            ExitCode::from(gametime::tracker::run(verbose) as u8)
+            ExitCode::from(gametime::tracker::run(verbose, false) as u8)
         }
         Some("--help" | "-h" | "help") | None => {
             println!("{USAGE}");
