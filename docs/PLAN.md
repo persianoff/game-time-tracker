@@ -27,7 +27,8 @@ Decisions made during implementation. Where they differ from the original design
 | Detection depth | Install dirs one level below a drive root are accepted (for example `D:\Fortnite`). Bare library roots (`D:\Games`, `D:\SteamLibrary` and similar) are rejected for auto sources but allowed in `extra_games`. | #21 |
 | Viewer days | Days are computed in the **gaming PC's offset**, which is embedded in each ISO time, never in the browser's time zone. A session crossing midnight is split by wall-clock overlap. | #19 |
 | Viewer colors | Colors are assigned by **all-time rank**: the top 8 games get distinct slots and the rest share "other". Every text/fill pair must reach ≥ 4.5:1 contrast in both themes, enforced by a self-test. | #28 |
-| Viewer browsers | The viewer uses CSS `light-dark()`, so it needs Chrome/Edge 123+, Firefox 120+ or Safari 17.5+ (a fallback is planned in #29). | #28 |
+| Detection (auto sources) | Auto sources that point at a launcher's own default folder are rejected like library roots, for example `Program Files\Epic Games` or `steamapps\common`. Manual `extra_games` entries are still allowed. An `ignore` value of `D:` means the whole drive. | #32 |
+| Viewer browsers | The viewer uses CSS `light-dark()`, so it needs Chrome/Edge 123+, Firefox 120+ or Safari 17.5+ Older browsers get a light-only fallback via `@supports not`, with a note when dark mode is requested. | #28, #31 |
 | Daily aggregation | Rust: `stats::split_by_local_day` with a per-instant offset (DST-aware). Sessions are capped at 7 days, and times beyond year 9999 are ignored. | #25 |
 | Autostart self-heal | Only `gametime-tracker.exe` repairs the Run entry, never `gametime run`, and never when the config failed to load or Task Manager has the entry disabled. | #27 |
 | Auto-export | Payloads are built on the poll thread and written on a short-lived thread, at most one in flight, without fsync. A relative `export_dir` is ignored. `daily.*` moved to #11. | #26 |
@@ -86,8 +87,9 @@ Two binaries come from one crate. The tracker runs with no console window. The C
 - **Epic:** `C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests\*.item`, using `DisplayName` and `InstallLocation`.
 - **GOG:** `HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\*`, using `gameName` and `path`.
 - **Ubisoft:** `HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\*\InstallDir`, named after the folder.
-- **EA:** `HKLM\SOFTWARE\WOW6432Node\Electronic Arts\*`, using `Install Dir`.
-- **Xbox:** `<drive>:\XboxGames\*` on every fixed drive.
+- **EA:** `HKLM\SOFTWARE\WOW6432Node\Electronic Arts\*`, using `Install Dir`. Also the HKLM `Uninstall` keys (both 64-bit and `WOW6432Node`) whose `Publisher` contains "Electronic Arts", using `DisplayName` and `InstallLocation`. A denylist skips the EA app, Origin, anti-cheat, redistributable, background-service and helper entries.
+- **Xbox:** `<drive>:\XboxGames\*`, plus the folders listed in `<drive>:\.GamingRoot`. Both header layouts are accepted, and if none parses, the first 32 bytes are logged once in hex.
+  - Rescans probe only the drives already known to have Xbox games. A full sweep of all fixed drives runs on the first scan and every 6 h.
 - **Exclusions:** launcher and helper exes (`steam.exe`, `steamwebhelper.exe`, `EpicGamesLauncher.exe`, `UnityCrashHandler*`, `CrashReport*`, `vc_redist*`, `dxsetup*`).
 - **Overrides:** `config.json` has `extra_games` (path → name) and `ignore` (paths).
 - **Matching:** case-insensitive longest-prefix match on the exe path.
