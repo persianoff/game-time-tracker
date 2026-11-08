@@ -124,3 +124,7 @@ Remove it later with `Remove-NetFirewallRule -DisplayName "GameTime viewer"`. Ma
 ```
 
 Then delete the exe folder and, if you want to drop the data, `%APPDATA%\GameTime\`. Remove the firewall rule if you added one.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,4 +1,4 @@
-# Build release and zip both exes, README, the checklist and the viewer into dist\gametime-<version>.zip.
+# Build release and zip both exes, README, LICENSE, the checklist and the viewer into dist\gametime-<version>.zip.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
@@ -16,7 +16,7 @@ try {
     if (Test-Path $zip) { Remove-Item -Force $zip }
     New-Item -ItemType Directory -Force (Join-Path $stage 'viewer') | Out-Null
 
-    Copy-Item target\release\gametime.exe, target\release\gametime-tracker.exe, README.md $stage
+    Copy-Item target\release\gametime.exe, target\release\gametime-tracker.exe, README.md, LICENSE $stage
     Copy-Item docs\CHECKLIST.md $stage
     Copy-Item viewer\index.html, viewer\sample-sessions.json (Join-Path $stage 'viewer')
 
