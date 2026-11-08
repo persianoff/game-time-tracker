@@ -30,6 +30,16 @@ pub struct SessionRecord {
 /// Write `bytes` to `<path>.tmp`, fsync, then rename over `path`.
 /// The temp file is removed on error.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_impl(path, bytes, true)
+}
+
+/// Like [`write_atomic`] but without `fsync`: for derived files that can be
+/// regenerated (exports), where a slow or networked disk must not stall.
+pub fn write_atomic_nosync(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_impl(path, bytes, false)
+}
+
+fn write_atomic_impl(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     // Unique per process so concurrent writers never share a temp file.
     let mut name = path.file_name().unwrap_or_default().to_owned();
     name.push(format!(".{}.tmp", std::process::id()));
@@ -38,7 +48,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
         f.flush()?;
-        f.sync_all()?;
+        if sync {
+            f.sync_all()?;
+        }
         drop(f);
         fs::rename(&tmp, path)
     })();

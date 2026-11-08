@@ -8,6 +8,8 @@
 //!   checkpoint) is added with `"open": true`.
 //! - CSV: header `game,source,start,end,minutes,active_s`, RFC 4180 quoting, CRLF
 //!   line endings, UTF-8 with a BOM so Excel detects the encoding. Closed sessions only.
+//!   Fields starting with `=`, `+`, `-` or `@` are deliberately left unchanged (data
+//!   fidelity over spreadsheet formula-injection hardening).
 //! - ICS (RFC 5545): one VEVENT per closed session, times in UTC, lines folded at 75
 //!   octets, CRLF.
 //!
@@ -159,7 +161,8 @@ fn ics_escape(s: &str) -> String {
             ';' => o.push_str("\\;"),
             ',' => o.push_str("\\,"),
             '\n' => o.push_str("\\n"),
-            '\r' => {}
+            '\t' => o.push('\t'),
+            c if (c as u32) < 0x20 => {} // control characters are not valid TEXT
             c => o.push(c),
         }
     }
@@ -190,6 +193,7 @@ pub fn to_ics(sessions: &[SessionRecord], now: u64) -> String {
         "VERSION:2.0",
         "PRODID:-//GameTime//EN",
         "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
         "X-WR-CALNAME:GameTime",
     ] {
         push_folded(&mut s, l);
@@ -218,21 +222,29 @@ pub fn to_ics(sessions: &[SessionRecord], now: u64) -> String {
 
 // ----------------------------------------------------------------- auto-export
 
-/// Rewrite `sessions.json` (with the open session, if any) and `gametime.ics`
-/// in `dir`, creating it if needed.
-pub fn write_auto(
-    dir: &Path,
-    store: &Store,
-    open: Option<&SessionRecord>,
-    now: u64,
-) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
+/// The bytes of both auto-export files, built on the poll thread so that the
+/// (possibly slow) disk writes can happen elsewhere.
+pub struct Payload {
+    pub json: Vec<u8>,
+    pub ics: Vec<u8>,
+}
+
+/// Load the closed sessions and format `sessions.json` (with the open session,
+/// if any) and `gametime.ics`.
+pub fn build_payload(store: &Store, open: Option<&SessionRecord>, now: u64) -> io::Result<Payload> {
     let closed = store.load_all()?;
-    store::write_atomic(
-        &dir.join(SESSIONS_JSON),
-        to_json(&closed, open, now).as_bytes(),
-    )?;
-    store::write_atomic(&dir.join(CALENDAR_ICS), to_ics(&closed, now).as_bytes())
+    Ok(Payload {
+        json: to_json(&closed, open, now).into_bytes(),
+        ics: to_ics(&closed, now).into_bytes(),
+    })
+}
+
+/// Write both files into `dir`, creating it if needed. No fsync: the files are
+/// derived data and `dir` may be a slow network share.
+pub fn write_payload(dir: &Path, p: &Payload) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    store::write_atomic_nosync(&dir.join(SESSIONS_JSON), &p.json)?;
+    store::write_atomic_nosync(&dir.join(CALENDAR_ICS), &p.ics)
 }
 
 // ------------------------------------------------------------------------ CLI
@@ -331,7 +343,7 @@ pub fn filter_since(sessions: &mut Vec<SessionRecord>, since: Option<(i32, u32, 
 }
 
 const EXPORT_USAGE: &str =
-    "Usage: gametime export --format csv|json|ics [--since YYYY-MM-DD] [--out PATH|-]";
+    "Usage: gametime export --format csv|json|ics [--since YYYY-MM-DD] [--out PATH|-]\n  --since keeps sessions whose local start date is on or after the given date";
 
 /// `gametime export ...`; `args` are the arguments after `export`.
 pub fn cli(args: &[String]) -> ExitCode {
@@ -358,6 +370,11 @@ fn run_cli(args: &Args) -> io::Result<()> {
         eprintln!("warning: skipped {skipped} unreadable line(s) in sessions.jsonl");
     }
     filter_since(&mut sessions, args.since);
+    if sessions.is_empty() {
+        eprintln!(
+            "warning: no sessions to export (an empty calendar may be rejected by some importers)"
+        );
+    }
     let now = win32::now_utc_secs();
     let bytes = match args.format {
         Format::Csv => to_csv(&sessions),
@@ -461,7 +478,7 @@ mod tests {
     fn ics_structure_and_utc() {
         let s = to_ics(&[rec("Doom", "steam", T, T + 4980 + 120, 4980)], T + 9999);
         assert!(s.starts_with(
-            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//GameTime//EN\r\nCALSCALE:GREGORIAN\r\nX-WR-CALNAME:GameTime\r\n"
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//GameTime//EN\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\nX-WR-CALNAME:GameTime\r\n"
         ));
         assert!(s.ends_with("END:VEVENT\r\nEND:VCALENDAR\r\n"));
         assert!(s.contains("\r\nDTSTART:20260102T030405Z\r\n"));
@@ -476,6 +493,7 @@ mod tests {
     #[test]
     fn ics_escaping() {
         assert_eq!(ics_escape("a\\b;c,d\ne\r"), "a\\\\b\\;c\\,d\\ne");
+        assert_eq!(ics_escape("a\u{0}b\u{7}c\td\u{1b}"), "abc\td");
         let s = to_ics(&[rec("A;B,C", "x", T, T + 10, 10)], T);
         assert!(s.contains("SUMMARY:A\\;B\\,C (10s)\r\n"));
     }
