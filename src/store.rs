@@ -48,6 +48,25 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     res
 }
 
+/// Remove a file; if that fails with PermissionDenied (read-only attribute),
+/// clear the attribute and try once more. A missing file is an error, as with
+/// `fs::remove_file`.
+fn remove_file_rw(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            let mut perms = fs::metadata(path)?.permissions();
+            if !perms.readonly() {
+                return Err(e);
+            }
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(path, perms)?;
+            fs::remove_file(path)
+        }
+        other => other,
+    }
+}
+
 /// Failure of [`Store::close_session`], telling the two steps apart.
 #[derive(Debug)]
 pub enum CloseError {
@@ -133,7 +152,7 @@ impl Store {
     }
 
     pub fn clear_checkpoint(&self) -> io::Result<()> {
-        match fs::remove_file(self.checkpoint_path()) {
+        match remove_file_rw(&self.checkpoint_path()) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         }
@@ -260,8 +279,13 @@ impl Store {
         for entry in rd.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("current.") && name.ends_with(".tmp") {
-                let _ = fs::remove_file(entry.path());
+            // Only `current.json.<pid>.tmp` of other processes (see write_atomic).
+            let pid = name
+                .strip_prefix("current.json.")
+                .and_then(|r| r.strip_suffix(".tmp"))
+                .and_then(|p| p.parse::<u32>().ok());
+            if pid.is_some_and(|p| p != std::process::id()) {
+                let _ = remove_file_rw(&entry.path());
             }
         }
     }
@@ -292,7 +316,7 @@ impl Store {
             self.append(&rec)?;
             log.push(rec.clone());
         }
-        fs::remove_file(path)?;
+        remove_file_rw(path)?;
         Ok(append.then_some(rec))
     }
 
@@ -302,7 +326,13 @@ impl Store {
             .map_or(0, |d| d.as_secs());
         loop {
             let to = self.dir.join(format!("current.{now}.pending.json"));
-            if !to.exists() {
+            // Any error other than NotFound counts as "name taken", so the
+            // rename can never replace an existing pending file.
+            let taken = !matches!(
+                fs::symlink_metadata(&to),
+                Err(e) if e.kind() == io::ErrorKind::NotFound
+            );
+            if !taken {
                 return fs::rename(path, to);
             }
             now += 1;
@@ -700,10 +730,38 @@ mod tests {
     }
 
     #[test]
+    fn orphan_cleanup_is_pid_specific() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let own = format!("current.json.{}.tmp", std::process::id());
+        fs::write(d.0.join(&own), b"x").unwrap();
+        fs::write(d.0.join("current.json.4000000000.tmp"), b"x").unwrap();
+        fs::write(d.0.join("current.other.tmp"), b"x").unwrap();
+        s.recover();
+        assert!(d.0.join(&own).exists());
+        assert!(!d.0.join("current.json.4000000000.tmp").exists());
+        assert!(d.0.join("current.other.tmp").exists());
+    }
+
+    #[test]
+    fn readonly_checkpoint_can_be_cleared() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let r = rec("A", 10, 20);
+        s.write_checkpoint(&r).unwrap();
+        let p = s.checkpoint_path();
+        let mut perms = fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&p, perms).unwrap();
+        s.close_session(&r).unwrap();
+        assert!(s.checkpoint_slot_free());
+    }
+
+    #[test]
     fn orphan_tmp_removed() {
         let d = TempDir::new();
         let s = Store::open(&d.0).unwrap();
-        fs::write(d.0.join("current.json.123.tmp"), b"x").unwrap();
+        fs::write(d.0.join("current.json.4000000000.tmp"), b"x").unwrap();
         let rv = s.recover();
         assert!(rv.checkpoint_free);
         assert!(!tmp_files(&d.0));
