@@ -1,3 +1,4 @@
 /target/
 *.pdb
 .claude/settings.local.json
+dist/
