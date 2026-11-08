@@ -11,6 +11,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE,
     SYSTEMTIME, WAIT_FAILED, WAIT_OBJECT_0,
 };
+use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
@@ -18,7 +19,7 @@ use windows_sys::Win32::System::Registry::{
     KEY_SET_VALUE, KEY_WOW64_64KEY, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, GetCurrentProcess, OpenEventW, OpenProcess,
+    CreateEventW, CreateMutexW, GetCurrentProcess, OpenEventW, OpenMutexW, OpenProcess,
     QueryFullProcessImageNameW, ResetEvent, SetEvent, SetProcessWorkingSetSize,
     WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -140,6 +141,21 @@ impl SingleInstance {
             }
             Some(SingleInstance(h))
         }
+    }
+}
+
+/// True if a named mutex exists (someone holds or has created it).
+pub fn is_running(name: &str) -> bool {
+    let n = wide(name);
+    // SAFETY: `n` is a NUL-terminated wide string that outlives the call.
+    unsafe {
+        let h = OpenMutexW(SYNCHRONIZE, 0, n.as_ptr());
+        if h.is_null() {
+            // Access denied means the mutex exists (e.g. elevated tracker).
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        drop(OwnedHandle(h));
+        true
     }
 }
 
@@ -591,6 +607,17 @@ mod tests {
         assert!(SingleInstance::acquire(&name).is_none());
         drop(first);
         assert!(SingleInstance::acquire(&name).is_some());
+    }
+
+    #[test]
+    fn is_running_sees_mutex() {
+        let name = format!("Local\\GameTimeIsRunningTest-{}", std::process::id());
+        assert!(!is_running(&name));
+        let held = SingleInstance::acquire(&name);
+        assert!(held.is_some());
+        assert!(is_running(&name));
+        drop(held);
+        assert!(!is_running(&name));
     }
 
     #[test]
