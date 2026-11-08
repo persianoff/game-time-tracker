@@ -282,10 +282,10 @@ mod tests {
     #[test]
     fn path_match_is_case_insensitive() {
         let t = TestKeys::new("case");
-        enable_in(t.keys(), Path::new(r"C:GamesGameTimegametime-tracker.exe")).unwrap();
+        enable_in(t.keys(), Path::new(EXE)).unwrap();
         let st = status_in(
             t.keys(),
-            Path::new(r"c:gamesgametimeGAMETIME-TRACKER.EXE"),
+            Path::new(r"c:\games\gametime\GAMETIME-TRACKER.EXE"),
             true,
         );
         assert!(st.matches);
