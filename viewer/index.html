@@ -1226,7 +1226,7 @@ GT.selftest = function () {
   function dayNum(k, inMonth) { return inMonth ? String(+k.slice(8)) : fmtShort(k); }
   // The hatched "rest of the day" bar segment (games after the day's top 3, lumped together).
   function restSeg(rest) { var o = el("i", { className: "rest" }); o.style.flexGrow = String(rest); o.style.flexBasis = "0"; return o; }
-  GT.ui = { dayNum: dayNum, restSeg: restSeg };
+  GT.ui = { dayNum: dayNum, restSeg: restSeg, showDoc: function (doc) { show(A.parseDocument(doc), "fixture"); } };
 
   function dayLabel(k, e, live) {
     var s = fmtDay(k);
@@ -1496,20 +1496,67 @@ GT.selftest = function () {
   });
 
   // ---- Self-test page ---------------------------------------------------
+  // Phone-width layout check: the page itself is loaded in a 360px iframe (same document, no start()), fed a fixture with long
+  // names, and every range / an open day timeline is checked for page-level horizontal overflow.
+  function layoutCheck(done) {
+    var f = document.createElement("iframe");
+    f.style.cssText = "position:absolute;left:-9999px;top:0;width:360px;height:1400px;border:0";
+    var html = document.documentElement.outerHTML.replace("<head>", "<head><script>window.__GT_NOSTART=1<\/script>");
+    f.onload = function () {
+      var out = true;
+      try {
+        var w = f.contentWindow, d = w.document, th = document.documentElement.getAttribute("data-theme");
+        if (th) d.documentElement.setAttribute("data-theme", th);
+        d.getElementById("selftest").style.display = "none";
+        var ss = [], names = ["Short", "A Very Long Game Title: Definitive Anniversary Edition Remastered", "Elden Ring", "Dota 2", "Factorio"];
+        for (var i = 1; i <= 12; i++) names.forEach(function (n, j) {
+          var h = 8 + j * 2, day = "2026-11-" + pad(i);
+          ss.push({ game: n, source: "steam", start: day + "T" + pad(h) + ":00:00+01:00", end: day + "T" + pad(h + 1) + ":30:00+01:00", active_s: 5400 });
+        });
+        w.GT.ui.showDoc({ version: 1, generated: "2026-11-12T20:00:00+01:00", sessions: ss });
+        var steps = [["month", function () {}], ["day", function () { d.querySelector(".day:not(.out)").click(); }],
+                     ["week", function () { d.querySelector("[data-range=week]").click(); }],
+                     ["year", function () { d.querySelector("[data-range=year]").click(); }],
+                     ["all", function () { d.querySelector("[data-range=all]").click(); }]];
+        var bad = [];
+        steps.forEach(function (st) {
+          st[1]();
+          var sw = d.documentElement.scrollWidth, iw = w.innerWidth;
+          if (iw !== 360) bad.push(st[0] + ": iframe is " + iw + "px wide, not 360");
+          else if (sw > iw) {
+            var who = []; d.querySelectorAll("body *").forEach(function (e) {
+              if (!e.closest(".scroll") && e.getBoundingClientRect().right > iw + 0.5) who.push(e.tagName.toLowerCase() + "." + e.className);
+            });
+            bad.push(st[0] + ": scrollWidth " + sw + " > " + iw + " (" + who.slice(0, 3).join(", ") + ")");
+          }
+        });
+        out = bad.length === 0 || bad.join("; ");
+      } catch (e) { out = "exception: " + e.message; }
+      document.body.removeChild(f);
+      done(out);
+    };
+    f.srcdoc = html;
+    document.body.appendChild(f);
+  }
+
   function runSelftest() {
     $("app").style.display = "none";
     var box = $("selftest"); box.style.display = "block";
-    var res = GT.selftest(), failed = 0;
-    res.forEach(function (r) {
-      if (!r.ok) failed++;
-      var line = (r.ok ? "PASS " : "FAIL ") + r.name + (r.ok ? "" : " — " + r.msg);
-      box.appendChild(el("div", { className: r.ok ? "pass" : "fail", textContent: line }));
-      (r.ok ? console.log : console.error)(line);
+    var res = GT.selftest();
+    layoutCheck(function (r) {
+      res.push({ name: "layout at 360px: no page-level horizontal overflow (month, open day, week, year, all)", ok: r === true, msg: String(r) });
+      var failed = 0;
+      res.forEach(function (r) {
+        if (!r.ok) failed++;
+        var line = (r.ok ? "PASS " : "FAIL ") + r.name + (r.ok ? "" : " — " + r.msg);
+        box.appendChild(el("div", { className: r.ok ? "pass" : "fail", textContent: line }));
+        (r.ok ? console.log : console.error)(line);
+      });
+      var sum = (res.length - failed) + "/" + res.length + " passed";
+      box.insertBefore(el("div", { className: failed ? "fail" : "pass", textContent: "Self-test: " + sum }), box.firstChild);
+      console.log("Self-test: " + sum);
+      document.title = (failed ? "FAIL" : "PASS") + " — GameTime self-test";
     });
-    var sum = (res.length - failed) + "/" + res.length + " passed";
-    box.insertBefore(el("div", { className: failed ? "fail" : "pass", textContent: "Self-test: " + sum }), box.firstChild);
-    console.log("Self-test: " + sum);
-    document.title = (failed ? "FAIL" : "PASS") + " — GameTime self-test";
   }
 
   // ---- Wiring -------------------------------------------------------------
@@ -1533,7 +1580,7 @@ GT.selftest = function () {
   var theme = qs.get("theme"); // debug / screenshots: ?theme=dark|light
   if (theme === "dark" || theme === "light") document.documentElement.setAttribute("data-theme", theme);
   if (qs.get("selftest") === "1") runSelftest();
-  else start();
+  else if (!window.__GT_NOSTART) start();
 })();
 </script>
 </body>
