@@ -4,19 +4,32 @@
 We want a tiny background app for Windows that records how long games are played, so the time can later be shown on a calendar. The tracker only collects. A separate, zero-install HTML viewer shows the calendar and stats on any machine.
 
 Decisions from the user:
-- **Rust**, for the smallest RAM footprint. Target: about **2–4 MB working set**, near-zero CPU, and one native `.exe` with no runtime needed.
+- **Rust**, for the smallest RAM footprint. Target: private bytes about 1–2 MB, working set under 4 MB (see the decisions log), near-zero CPU, and one native `.exe` with no runtime needed.
 - **Minimal dependencies.**
 - **Game detection:** auto-detect games installed by launchers (Steam, Epic, GOG, Ubisoft, EA, Xbox).
 - **Time rule:** count only time when the game window is in the foreground.
 - **Output:** stats only, exported in portable formats.
 
-The project folder `C:\Users\opersianov\TT` is empty, so this is a greenfield build.
+## Decisions log
+Decisions made during implementation. Where they differ from the original design below, these win.
 
-## Step 0: toolchain (not installed yet)
-- Neither Rust nor the MSVC build tools are on the machine. The user needs to install them once:
-  - `winget install Rustlang.Rustup`, then run `rustup-init`. It offers to install the Visual Studio Build Tools (MSVC linker and Windows SDK). Accept.
-  - A lighter alternative, if the multi-GB VS Build Tools aren't wanted: `rustup default stable-x86_64-pc-windows-gnu`. It brings its own linker, and our crate list has no C code, so it works too.
-- Check: `cargo --version`.
+| Topic | Decision | Source |
+|---|---|---|
+| Target machine | The tracker runs on a **separate gaming PC**. The dev machine has no launchers, so detection is tested with fixtures there, and the end-to-end check (#14) runs on the gaming PC. | User, 2026-11-08 |
+| Toolchain | `stable-x86_64-pc-windows-gnu`, pinned in `rust-toolchain.toml`. No MSVC Build Tools. | User, 2026-11-07 |
+| `windows-sys` | Pinned to **0.59**: it ships prebuilt GNU import libs, while 0.61+ needs `dlltool` and `as`. | #18 |
+| Memory target | Measured as **private bytes ~1–2 MB, working set < 4 MB after trim**. The tracker calls `SetProcessWorkingSetSize(-1,-1)` after startup and after each rescan. Measured: 0.5–0.6 MB working set, 1.2–1.3 MB private. | #23 |
+| Logoff / shutdown | No hidden window or `WM_ENDSESSION` handling. Losing up to ~30 s is accepted, and the session is recovered from the checkpoint at the next start. | User, 2026-11-08 |
+| Time attribution | Sample-and-hold: each poll interval is credited to the game that was in the foreground at the previous poll, when the gap is ≤ 10 s. | #17 |
+| Session state machine | It lives in `session.rs`, and `tracker.rs` holds the engine and the loop. `step()` returns `Option<Session>` rather than events. | #17 |
+| Checkpoints | Written only while the slot is free and owned. `recover()` returns `Recovery { recovered, checkpoint_free, errors }`, and an unreadable checkpoint is set aside as `current.<ts>.pending.json`. | #20, #23 |
+| Rescan | Every 30 min, but only while no session is open or paused. | #23 |
+| Detection depth | Install dirs one level below a drive root are accepted (for example `D:\Fortnite`). Bare library roots (`D:\Games`, `D:\SteamLibrary` and similar) are rejected for auto sources but allowed in `extra_games`. | #21 |
+| Viewer days | Days are computed in the **gaming PC's offset**, which is embedded in each ISO time, never in the browser's time zone. A session crossing midnight is split by wall-clock overlap. | #19 |
+
+## Step 0: toolchain
+- Install `winget install Rustlang.Rustup`, then `rustup default stable-x86_64-pc-windows-gnu` (see the decisions log).
+- Check with `cargo --version`.
 
 ## Dependencies (kept minimal)
 | Crate | Why |
