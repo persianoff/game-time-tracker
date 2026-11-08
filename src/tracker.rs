@@ -518,7 +518,13 @@ impl Engine {
         {
             self.recover_calls += 1;
         }
-        let rv = self.store.recover();
+        // While our own checkpoint is live, never touch current.json.
+        let own = self.ckpt.is_some();
+        let rv = if own {
+            self.store.recover_pending()
+        } else {
+            self.store.recover()
+        };
         for r in &rv.recovered {
             log::log_line(&format!(
                 "recovered session {} start={}",
@@ -528,7 +534,8 @@ impl Engine {
         for e in &rv.errors {
             log::log_line(&format!("recover error: {e}"));
         }
-        self.slot_ok = rv.checkpoint_free;
+        // Our own live current.json is not a busy slot.
+        self.slot_ok = own || rv.checkpoint_free;
         self.need_recover = !rv.errors.is_empty();
         if self.slot_ok && !self.need_recover {
             self.recover_wait = RECOVER_WAIT_MIN_S;
@@ -1184,6 +1191,91 @@ mod tests {
         assert_eq!(s.load_checkpoint().unwrap().game, "Alpha");
         let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
         assert_eq!(names, vec!["Old"]);
+    }
+
+    fn old_rec() -> SessionRecord {
+        SessionRecord {
+            game: "Old".into(),
+            source: "gog".into(),
+            exe: "x".into(),
+            start_utc: 5,
+            end_utc: 50,
+            active_s: 45,
+        }
+    }
+
+    #[test]
+    fn retry_with_open_session_keeps_live_checkpoint_and_recovers_pending() {
+        let d = TempDir::new("retrylive");
+        let s = Store::open(&d.0).unwrap();
+        let mut e = engine(&d, true);
+        run_for(&mut e, 1000, 65, || exe(1, ALPHA));
+        let live = s.load_checkpoint().unwrap();
+        assert_eq!(live.game, "Alpha");
+        fs::write(
+            d.0.join("current.77.pending.json"),
+            serde_json::to_vec(&old_rec()).unwrap(),
+        )
+        .unwrap();
+        e.need_recover = true;
+        e.next_recover = 0;
+        run_for(&mut e, 1065, 35, || exe(1, ALPHA));
+        assert!(!d.0.join("current.77.pending.json").exists());
+        let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
+        assert_eq!(names, vec!["Old"]); // live prefix not appended
+        assert!(!e.need_recover);
+        assert!(e.slot_ok);
+        // Checkpointing continues for at least two more intervals.
+        let after_retry = s.load_checkpoint().unwrap();
+        assert_eq!(after_retry.start_utc, live.start_utc);
+        run_for(&mut e, 1100, 65, || exe(1, ALPHA));
+        let later = s.load_checkpoint().unwrap();
+        assert!(
+            later.end_utc > after_retry.end_utc,
+            "{later:?} {after_retry:?}"
+        );
+        assert!(e.slot_ok);
+        // Ending the session closes it fully and clears the checkpoint.
+        run_for(&mut e, 1165, 130, || Foreground::None);
+        assert!(!d.0.join("current.json").exists());
+        assert!(e.ckpt.is_none());
+        let recs = records(&d);
+        let alpha: Vec<_> = recs.iter().filter(|r| r.game == "Alpha").collect();
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].start_utc, live.start_utc);
+        assert!(alpha[0].end_utc >= later.end_utc);
+    }
+
+    #[test]
+    fn failing_pending_retry_does_not_stop_checkpointing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = TempDir::new("retryfail");
+        let s = Store::open(&d.0).unwrap();
+        let mut e = engine(&d, true);
+        run_for(&mut e, 1000, 65, || exe(1, ALPHA));
+        let pend = d.0.join("current.77.pending.json");
+        fs::write(&pend, serde_json::to_vec(&old_rec()).unwrap()).unwrap();
+        // Readable but not deletable: the retry keeps failing.
+        let h = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&pend)
+            .unwrap();
+        e.need_recover = true;
+        e.next_recover = 0;
+        run_for(&mut e, 1065, 35, || exe(1, ALPHA));
+        let first = s.load_checkpoint().unwrap();
+        run_for(&mut e, 1100, 130, || exe(1, ALPHA));
+        let later = s.load_checkpoint().unwrap();
+        assert!(later.end_utc > first.end_utc);
+        assert!(e.need_recover);
+        assert!(e.slot_ok);
+        assert!(d.0.join("current.json").exists());
+        drop(h);
+        run_for(&mut e, 1230, 200, || exe(1, ALPHA));
+        assert!(!e.need_recover);
+        assert!(!pend.exists());
+        assert!(s.load_checkpoint().unwrap().end_utc > later.end_utc);
     }
 
     #[test]
