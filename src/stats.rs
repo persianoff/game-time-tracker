@@ -10,6 +10,19 @@ pub type Date = (i32, u32, u32);
 /// Active seconds per (local day, game).
 pub type Daily = BTreeMap<(Date, String), u64>;
 
+/// Last valid UTC second: 9999-12-31T23:59:59Z. Later times (for example
+/// millisecond timestamps) are treated as bogus.
+const MAX_UTC: u64 = 253_402_300_799;
+
+/// Longest wall-clock span a single session is split over. Longer spans are
+/// clamped so a bogus record cannot cause unbounded work.
+pub const MAX_SPAN: u64 = 7 * 86400;
+
+/// Local date of a UTC instant under the given offset function.
+pub fn local_date(utc: u64, offset: impl Fn(u64) -> i32) -> Date {
+    date_of(day_index(utc, &offset))
+}
+
 fn day_index(utc: u64, offset: &impl Fn(u64) -> i32) -> i64 {
     (utc as i64 + offset(utc) as i64).div_euclid(86400)
 }
@@ -44,9 +57,16 @@ fn next_boundary(cur: u64, day: i64, offset: &impl Fn(u64) -> i32) -> u64 {
 /// proportion to wall-clock overlap with cumulative rounding, so the pieces
 /// sum to exactly `active_s`. A zero-length session yields one piece on the
 /// start day. Pieces are in chronological order, one per local day.
+///
+/// A record whose start or end lies beyond year 9999 is invalid and yields no
+/// pieces. The wall-clock span is clamped to [`MAX_SPAN`] (7 days); `active_s`
+/// is still preserved exactly, distributed over the clamped span.
 pub fn split_by_local_day(rec: &SessionRecord, offset: impl Fn(u64) -> i32) -> Vec<(Date, u64)> {
+    if rec.start_utc > MAX_UTC || rec.end_utc > MAX_UTC {
+        return Vec::new();
+    }
     let start = rec.start_utc;
-    let end = rec.end_utc.max(start);
+    let end = rec.end_utc.max(start).min(start + MAX_SPAN);
     let first_day = day_index(start, &offset);
     if end == start {
         return vec![(date_of(first_day), rec.active_s)];
@@ -271,6 +291,48 @@ mod tests {
         assert_eq!(p[0].1, 3600);
         assert_eq!(p[1].1, 23 * 3600);
         assert_eq!(p[2].1, 3600);
+    }
+
+    #[test]
+    fn bogus_times_are_bounded() {
+        let t = std::time::Instant::now();
+        // End at u64::MAX and a millisecond-style end are invalid.
+        assert!(split_by_local_day(&rec("A", D0, u64::MAX, 5), |_| 0).is_empty());
+        assert!(split_by_local_day(&rec("A", D0, D0 * 1000, 5), |_| 0).is_empty());
+        assert!(split_by_local_day(&rec("A", u64::MAX, u64::MAX, 5), |_| 0).is_empty());
+        // A huge but valid span is clamped to 7 days; active_s is preserved.
+        let r = rec("A", D0, D0 + 4_000_000_000, 123_457);
+        let p = split_by_local_day(&r, |_| 0);
+        assert!(p.len() <= 8 && p.len() >= 7);
+        assert_eq!(p.iter().map(|x| x.1).sum::<u64>(), 123_457);
+        assert!(daily([&rec("A", D0, u64::MAX, 5)], |_| 0).is_empty());
+        assert!(t.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn boundary_guard_with_pathological_offset() {
+        // Offset that makes local time go backwards every hour: must still
+        // terminate with ascending boundaries and exact sums.
+        let weird = |t: u64| {
+            if (t / 3600).is_multiple_of(2) {
+                0
+            } else {
+                -3 * 3600
+            }
+        };
+        let r = rec("A", D0, D0 + 3 * DAY, 1000);
+        let p = split_by_local_day(&r, weird);
+        assert!(!p.is_empty());
+        assert_eq!(p.iter().map(|x| x.1).sum::<u64>(), 1000);
+        // Constant huge negative offset: next_boundary lands after `cur`.
+        assert_eq!(next_boundary(D0, day_index(D0, &|_| 0), &|_| 0), D0 + DAY);
+    }
+
+    #[test]
+    fn local_date_uses_offset() {
+        assert_eq!(local_date(D0 + DAY - 1, |_| 0), (2026, 1, 10));
+        assert_eq!(local_date(D0 + DAY - 1, |_| 3600), (2026, 1, 11));
+        assert_eq!(local_date(D0, |_| -1), (2026, 1, 9));
     }
 
     #[test]

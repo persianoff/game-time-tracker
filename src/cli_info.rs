@@ -27,7 +27,8 @@ pub fn fmt_date(d: Date) -> String {
     format!("{:04}-{:02}-{:02}", d.0, d.1, d.2)
 }
 
-/// Pad `s` with spaces to `width` characters (char count, not bytes).
+/// Pad `s` with spaces to `width` characters. Counts chars, not display
+/// width, so wide (CJK) or combining characters may misalign.
 fn pad(s: &str, width: usize) -> String {
     let n = s.chars().count();
     let mut out = String::with_capacity(s.len() + width.saturating_sub(n));
@@ -248,18 +249,22 @@ pub fn render_status(d: &StatusData) -> String {
 /// Build the status data from loaded records. `offset` is the local UTC
 /// offset function; `now` is the current UTC time. The checkpointed session
 /// is counted too, unless it is already in `records`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_status(
     records: &[SessionRecord],
     checkpoint: Option<&SessionRecord>,
+    pending: &[SessionRecord],
     skipped_lines: usize,
     tracker_running: bool,
     now: u64,
     offset: impl Fn(u64) -> i32 + Copy,
     data_dir: &Path,
 ) -> StatusData {
+    // Unrecovered sessions (checkpoint and pending files) count too, unless
+    // the log already holds the same (game, start_utc).
     let mut all: Vec<&SessionRecord> = records.iter().collect();
-    if let Some(c) = checkpoint {
-        if !records
+    for c in checkpoint.into_iter().chain(pending) {
+        if !all
             .iter()
             .any(|r| r.game == c.game && r.start_utc == c.start_utc)
         {
@@ -267,10 +272,7 @@ pub fn build_status(
         }
     }
     let daily = stats::daily(all, offset);
-    let today_date = {
-        let (y, m, d) = civil_date(now, offset);
-        (y, m, d)
-    };
+    let today_date = stats::local_date(now, offset);
     let (_, today) = stats::day_summary(&daily, today_date);
     let week = stats::last_days(today_date, 7)
         .into_iter()
@@ -297,11 +299,6 @@ pub fn build_status(
         skipped_lines,
         data_dir: data_dir.display().to_string(),
     }
-}
-
-fn civil_date(utc: u64, offset: impl Fn(u64) -> i32) -> Date {
-    let (y, m, d) = win32::civil_from_days((utc as i64 + offset(utc) as i64).div_euclid(86400));
-    (y as i32, m, d)
 }
 
 pub fn status(args: &[String]) -> ExitCode {
@@ -332,6 +329,7 @@ pub fn status(args: &[String]) -> ExitCode {
     let data = build_status(
         &records,
         store.load_checkpoint().as_ref(),
+        &store.load_pending(),
         skipped,
         win32::is_running(MUTEX_NAME),
         win32::now_utc_secs(),
@@ -487,7 +485,16 @@ mod tests {
             rec("A", d0 - day + 100, d0 - day + 700, 600),
         ];
         let cp = rec("C", d0 + 9 * 3600, d0 + 10 * 3600, 1800);
-        let s = build_status(&records, Some(&cp), 0, true, now, |_| 0, Path::new("D"));
+        let s = build_status(
+            &records,
+            Some(&cp),
+            &[],
+            0,
+            true,
+            now,
+            |_| 0,
+            Path::new("D"),
+        );
         assert_eq!(
             s.today,
             vec![("A".into(), 3600), ("C".into(), 1800), ("B".into(), 60)]
@@ -499,9 +506,53 @@ mod tests {
         assert_eq!(s.week[2].total_s, 0);
         assert_eq!(s.current.as_ref().unwrap().game, "C");
 
+        // Pending sessions count, deduped against the log and checkpoint.
+        let pend = vec![
+            rec("P", d0 + 100, d0 + 200, 40),
+            rec("A", d0 + 3600, d0 + 7200, 3600),
+            rec("C", d0 + 9 * 3600, d0 + 10 * 3600, 1800),
+        ];
+        let s = build_status(
+            &records,
+            Some(&cp),
+            &pend,
+            0,
+            true,
+            now,
+            |_| 0,
+            Path::new("D"),
+        );
+        assert_eq!(s.week[0].total_s, 3600 + 1800 + 60 + 40);
+
         // A checkpoint already in the log is not double counted.
         let dup = rec("A", d0 + 3600, d0 + 7200, 3600);
-        let s = build_status(&records, Some(&dup), 0, true, now, |_| 0, Path::new("D"));
+        let s = build_status(
+            &records,
+            Some(&dup),
+            &[],
+            0,
+            true,
+            now,
+            |_| 0,
+            Path::new("D"),
+        );
         assert_eq!(s.week[0].total_s, 3660);
+    }
+
+    #[test]
+    fn build_status_offset_and_midnight_crossing() {
+        let day = 86400u64;
+        let d0 = 20463 * day; // 2026-01-10 00:00 UTC
+        let off = |_| 2 * 3600; // UTC+2
+                                // 21:00-23:00 UTC Jan 10 = 23:00 Jan 10 .. 01:00 Jan 11 local.
+        let r = rec("A", d0 + 21 * 3600, d0 + 23 * 3600, 7200);
+        // "now" is 23:30 UTC = 01:30 local on Jan 11.
+        let now = d0 + 23 * 3600 + 1800;
+        let s = build_status(&[r], None, &[], 0, false, now, off, Path::new("D"));
+        assert_eq!(s.week[0].date, (2026, 1, 11));
+        assert_eq!(s.week[0].total_s, 3600);
+        assert_eq!(s.week[1].date, (2026, 1, 10));
+        assert_eq!(s.week[1].total_s, 3600);
+        assert_eq!(s.today, vec![("A".to_string(), 3600)]);
     }
 }

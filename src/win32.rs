@@ -11,6 +11,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE,
     SYSTEMTIME, WAIT_FAILED, WAIT_OBJECT_0,
 };
+use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
@@ -145,13 +146,13 @@ impl SingleInstance {
 
 /// True if a named mutex exists (someone holds or has created it).
 pub fn is_running(name: &str) -> bool {
-    const SYNCHRONIZE: u32 = 0x0010_0000;
     let n = wide(name);
     // SAFETY: `n` is a NUL-terminated wide string that outlives the call.
     unsafe {
         let h = OpenMutexW(SYNCHRONIZE, 0, n.as_ptr());
         if h.is_null() {
-            return false;
+            // Access denied means the mutex exists (e.g. elevated tracker).
+            return GetLastError() == ERROR_ACCESS_DENIED;
         }
         drop(OwnedHandle(h));
         true
