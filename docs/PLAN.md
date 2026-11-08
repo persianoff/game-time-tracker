@@ -177,7 +177,7 @@ The last-used source is remembered in `localStorage`.
 ## Verification
 1. `cargo test`. Tests cover the VDF and ACF parser, Epic manifest parsing, prefix matching with exclusions, the state machine (alt-tab within and beyond the merge gap, a sleep gap, switching between two games), crash-checkpoint recovery, and ICS and CSV formatting.
 2. `cargo build --release`, then `gametime scan` should list the installed games correctly.
-3. `gametime run --verbose`. Play a game, alt-tab out for under and over 60 s, then quit. Check the start, pause, resume and close events in the log and that the times match a stopwatch.
+3. `gametime run --verbose`. Play a game, alt-tab out for under and over 60 s, then quit. The log shows `tracking <game>` at start and `session closed: <game> <N>s active` at close. Pause and resume are not logged: alt-tab under 60 s leaves one session, while alt-tab over 60 s closes it and starts a new one on return. Active seconds must match a stopwatch.
 4. `gametime status` should show the expected totals.
 5. `gametime export --format ics` → import the file into a calendar and check the events. Also check the CSV and JSON files.
 6. **Autostart:**
