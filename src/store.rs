@@ -175,6 +175,28 @@ impl Store {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Read-only: sessions in `current.*.pending.json` files that recovery has
+    /// not yet merged into the log. Unreadable files are skipped.
+    pub fn load_pending(&self) -> Vec<SessionRecord> {
+        let Ok(rd) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = rd
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with("current.") && n.ends_with(".pending.json")
+            })
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        paths
+            .iter()
+            .filter_map(|p| serde_json::from_slice(&fs::read(p).ok()?).ok())
+            .collect()
+    }
+
     /// True if `current.json` does not exist, i.e. it is safe to call
     /// [`Store::write_checkpoint`].
     pub fn checkpoint_slot_free(&self) -> bool {
@@ -643,6 +665,21 @@ mod tests {
         assert_eq!(got, vec![rec("B", 200, 260)]);
         assert!(pending_files(&d.0).is_empty());
         assert_eq!(lines(&s), 2);
+    }
+
+    #[test]
+    fn load_pending_is_read_only() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        assert!(s.load_pending().is_empty());
+        fs::write(
+            d.0.join("current.5.pending.json"),
+            serde_json::to_vec(&rec("B", 200, 260)).unwrap(),
+        )
+        .unwrap();
+        fs::write(d.0.join("current.6.pending.json"), b"junk").unwrap();
+        assert_eq!(s.load_pending(), vec![rec("B", 200, 260)]);
+        assert_eq!(pending_files(&d.0).len(), 2);
     }
 
     #[test]
