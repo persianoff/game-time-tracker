@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use crate::config::{self, Config};
 use crate::detect::{self, GameDb, Source};
+use crate::export;
 use crate::log;
 use crate::session::{Params, Session, Tracker};
 use crate::store::{CloseError, SessionRecord, Store};
@@ -32,6 +33,12 @@ const RECOVER_WAIT_MAX_S: u64 = 600;
 const MAX_RETRY_SLOTS: usize = 8;
 /// Bound on the set of access-denied pids that were already logged.
 const MAX_DENIED_PIDS: usize = 256;
+
+/// Writes an export payload into a directory (on a background thread).
+type ExportWriter = fn(&std::path::Path, &export::Payload) -> std::io::Result<()>;
+
+/// Bounded wait for the export writer at shutdown.
+const EXPORT_JOIN_WAIT_MS: u64 = 5000;
 
 /// Identity of a game that survives rescans (the `GameDb` is rebuilt).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +83,22 @@ pub struct Engine {
     need_recover: bool,
     last_ckpt: Option<u64>,
     last_scan: Option<u64>,
+    /// A session closed (or an append recovered) since the last export.
+    export_dirty: bool,
+    /// Earliest time of the next auto-export attempt.
+    export_at: u64,
+    /// Consecutive failed auto-exports (drives the backoff).
+    export_fails: u32,
+    /// The background writer of the export in flight (at most one).
+    export_job: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    /// Performs the export writes (replaceable by tests).
+    export_writer: ExportWriter,
+    /// Tick time at which the export in flight started.
+    export_started: u64,
+    /// The slow-export warning was already logged for this job.
+    export_slow_logged: bool,
+    /// Bounded wait for the writer at shutdown (ms).
+    export_join_wait_ms: u64,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
     #[cfg(test)]
@@ -93,6 +116,11 @@ impl Engine {
         store: Store,
         checkpoint_free: bool,
     ) -> Engine {
+        let mut cfg = cfg;
+        if matches!(&cfg.export_dir, Some(d) if !d.is_absolute()) {
+            log::log_line("export_dir is not an absolute path; auto-export disabled");
+            cfg.export_dir = None;
+        }
         let params = Params {
             merge_gap_s: cfg.merge_gap_s,
             ..Params::default()
@@ -114,6 +142,14 @@ impl Engine {
             need_recover: false,
             last_ckpt: None,
             last_scan: None,
+            export_dirty: true,
+            export_at: 0,
+            export_fails: 0,
+            export_job: None,
+            export_writer: export::write_payload,
+            export_started: 0,
+            export_slow_logged: false,
+            export_join_wait_ms: EXPORT_JOIN_WAIT_MS,
             last_seen: 0,
             #[cfg(test)]
             match_calls: 0,
@@ -186,6 +222,7 @@ impl Engine {
         self.maybe_checkpoint(now);
         // Last, so a slow scan never delays a poll's clock reading.
         self.maybe_rescan(now);
+        self.maybe_export(now);
     }
 
     /// Close the open session (stop/shutdown) and make a last attempt at any
@@ -197,6 +234,131 @@ impl Engine {
         }
         if !self.retry.is_empty() {
             self.retry_appends(self.last_seen, true);
+        }
+        // A stuck writer was detached: skip the final export (it would stall too).
+        let writer_ok = self.wait_export();
+        // No tick ever ran: no meaningful timestamp, nothing to add.
+        if writer_ok && self.export_dirty && self.last_seen != 0 && self.cfg.export_dir.is_some() {
+            let now = win32::now_utc_secs().max(self.last_seen);
+            self.start_export(now);
+            self.wait_export();
+        }
+    }
+
+    /// Wait (bounded) for the export in flight, then collect its result.
+    /// Returns false if a stuck writer had to be detached.
+    fn wait_export(&mut self) -> bool {
+        let mut waited = 0;
+        while matches!(&self.export_job, Some(j) if !j.is_finished()) {
+            if waited >= self.export_join_wait_ms {
+                log::log_line("auto-export still running at shutdown; giving up on it");
+                self.export_job = None; // detach
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 5;
+        }
+        self.reap_export(self.last_seen);
+        true
+    }
+
+    /// Collect the result of a finished export writer.
+    fn reap_export(&mut self, now: u64) {
+        if !matches!(&self.export_job, Some(j) if j.is_finished()) {
+            return;
+        }
+        if let Some(job) = self.export_job.take() {
+            let res = job
+                .join()
+                .unwrap_or_else(|_| Err(std::io::Error::other("export thread panicked")));
+            self.export_done(res, now);
+        }
+    }
+
+    fn export_done(&mut self, res: std::io::Result<()>, now: u64) {
+        match res {
+            Ok(()) => {
+                self.export_fails = 0;
+                // Don't keep a backed-off delay after recovery.
+                let next = self.export_started.saturating_add(self.export_wait());
+                self.export_at = self.export_at.min(next);
+            }
+            Err(e) => {
+                self.export_fails = self.export_fails.saturating_add(1);
+                self.export_dirty = true;
+                self.export_at = now.saturating_add(self.export_wait());
+                log::log_line(&format!("auto-export failed: {e}"));
+            }
+        }
+        win32::trim_working_set();
+    }
+
+    /// Auto-export when `export_dir` is set, the interval has elapsed and
+    /// something changed (a session closed, or one is still open and growing).
+    fn maybe_export(&mut self, now: u64) {
+        if self.cfg.export_dir.is_none() {
+            return;
+        }
+        self.reap_export(now);
+        if self.export_job.is_some() {
+            if !self.export_slow_logged && now.saturating_sub(self.export_started) > 600 {
+                self.export_slow_logged = true;
+                log::log_line("auto-export has been in flight for over 10 minutes");
+            }
+            return; // at most one export in flight
+        }
+        let wait = self.export_wait();
+        if self.export_at > now + wait {
+            self.export_at = now; // clock went backwards
+        }
+        if now < self.export_at {
+            return;
+        }
+        if !self.export_dirty && self.tracker.is_idle() {
+            self.export_at = now.saturating_add(wait);
+            return;
+        }
+        self.start_export(now);
+    }
+
+    /// Interval between attempts: configured (min 1 minute), doubled per
+    /// consecutive failure up to an hour (or the interval, if longer).
+    fn export_wait(&self) -> u64 {
+        let base = self.cfg.export_interval_min.clamp(1, 10080) * 60;
+        base.saturating_mul(1 << self.export_fails.min(6))
+            .min(base.max(3600))
+    }
+
+    /// Build both payloads here (cheap, local disk) and hand the bytes to a
+    /// short-lived thread for the writes, which may stall on a network share
+    /// and must never delay the poll. Errors are logged, never fatal.
+    fn start_export(&mut self, now: u64) {
+        let Some(dir) = self.cfg.export_dir.clone() else {
+            return;
+        };
+        let open = self
+            .tracker
+            .current()
+            .map(|s| self.record(&s, String::new()));
+        let payload = match export::build_payload(&self.store, open.as_ref(), now) {
+            Ok(p) => p,
+            Err(e) => {
+                self.export_done(Err(e), now);
+                return;
+            }
+        };
+        self.export_dirty = false;
+        self.export_started = now;
+        self.export_slow_logged = false;
+        self.export_at = now.saturating_add(self.export_wait());
+        let write = self.export_writer;
+        let spawned = std::thread::Builder::new()
+            .name("export".into())
+            .stack_size(128 * 1024)
+            .spawn(move || write(&dir, &payload));
+        match spawned {
+            Ok(h) => self.export_job = Some(h),
+            Err(e) => self.export_done(Err(e), now),
         }
     }
 
@@ -212,6 +374,7 @@ impl Engine {
     }
 
     fn commit(&mut self, sess: Session<GameKey>, exe: String, now: u64) {
+        self.export_dirty = true;
         let rec = self.record(&sess, exe);
         let owns = self.slot_ok
             && matches!(&self.ckpt, Some((g, st)) if *g == sess.game && *st == sess.start);
@@ -282,10 +445,13 @@ impl Engine {
                 continue;
             }
             match self.store.append(&p.rec) {
-                Ok(()) => log::log_line(&format!(
-                    "append retry succeeded for {} start={}",
-                    p.rec.game, p.rec.start_utc
-                )),
+                Ok(()) => {
+                    self.export_dirty = true;
+                    log::log_line(&format!(
+                        "append retry succeeded for {} start={}",
+                        p.rec.game, p.rec.start_utc
+                    ));
+                }
                 Err(e) => {
                     p.attempts += 1;
                     p.next_at = now + RETRY_EVERY_S;
@@ -559,6 +725,270 @@ mod tests {
         for t in t0..t0 + n {
             e.tick(t, fg());
         }
+    }
+
+    fn export_engine(d: &TempDir, interval_min: u64) -> (Engine, PathBuf) {
+        let out = d.0.join("export");
+        let cfg = Config {
+            export_dir: Some(out.clone()),
+            export_interval_min: interval_min,
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        (e, out)
+    }
+
+    /// Like `run_for`, but waits for the export writer after every tick so the
+    /// results are deterministic.
+    fn run_x(e: &mut Engine, t0: u64, n: u64, fg: impl Fn() -> Foreground) {
+        for t in t0..t0 + n {
+            e.tick(t, fg());
+            while matches!(&e.export_job, Some(j) if !j.is_finished()) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            e.reap_export(t);
+        }
+    }
+
+    fn export_json(out: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(out.join("sessions.json")).unwrap()).unwrap()
+    }
+
+    fn export_count(out: &std::path::Path) -> usize {
+        export_json(out)["sessions"].as_array().unwrap().len()
+    }
+
+    #[test]
+    fn no_export_without_export_dir() {
+        let d = TempDir::new("noexport");
+        let mut e = engine(&d, true);
+        run_x(&mut e, 1000, 200, || exe(1, ALPHA));
+        e.shutdown();
+        assert!(!d.0.join("export").exists());
+        assert!(!d.0.join("sessions.json").exists());
+    }
+
+    #[test]
+    fn auto_export_creates_dir_and_includes_open_session() {
+        let d = TempDir::new("exp-open");
+        let (mut e, out) = export_engine(&d, 1);
+        run_x(&mut e, 1000, 30, || exe(1, ALPHA));
+        // The first tick exports immediately (startup state).
+        assert!(out.join("gametime.ics").exists());
+        assert_eq!(export_count(&out), 0);
+        // One interval later the still-open session shows up, flagged.
+        run_x(&mut e, 1030, 60, || exe(1, ALPHA));
+        let v = export_json(&out);
+        let ss = v["sessions"].as_array().unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss[0]["game"], "Alpha");
+        assert_eq!(ss[0]["open"], true);
+        // The calendar has closed sessions only.
+        let ics = fs::read_to_string(out.join("gametime.ics")).unwrap();
+        assert!(!ics.contains("BEGIN:VEVENT"));
+    }
+
+    #[test]
+    fn auto_export_waits_for_interval_and_dirty_flag() {
+        let d = TempDir::new("exp-dirty");
+        let (mut e, out) = export_engine(&d, 5);
+        run_x(&mut e, 1000, 1, || Foreground::None); // startup export
+        assert_eq!(e.export_at, 1300);
+        assert!(!e.export_dirty);
+        // A session closes: dirty, but nothing is written before the interval.
+        run_x(&mut e, 1001, 20, || exe(1, ALPHA));
+        run_x(&mut e, 1021, 100, || Foreground::None);
+        assert!(e.export_dirty);
+        run_x(&mut e, 1121, 170, || Foreground::None);
+        assert_eq!(export_count(&out), 0);
+        run_x(&mut e, 1291, 20, || Foreground::None);
+        assert_eq!(export_count(&out), 1);
+        assert!(!e.export_dirty);
+        assert!(export_json(&out)["sessions"][0].get("open").is_none());
+        let ics = fs::read_to_string(out.join("gametime.ics")).unwrap();
+        assert!(ics.contains("BEGIN:VEVENT"));
+        // Idle and clean: the next due time passes without a rewrite.
+        let at = e.export_at;
+        fs::remove_file(out.join("sessions.json")).unwrap();
+        run_x(&mut e, at, 10, || Foreground::None);
+        assert!(!out.join("sessions.json").exists());
+        assert_eq!(e.export_at, at + 300);
+    }
+
+    #[test]
+    fn shutdown_exports_when_dirty() {
+        let d = TempDir::new("exp-shutdown");
+        let (mut e, out) = export_engine(&d, 60);
+        run_x(&mut e, 1000, 40, || exe(1, ALPHA));
+        e.shutdown();
+        let v = export_json(&out);
+        let ss = v["sessions"].as_array().unwrap();
+        assert_eq!(ss.len(), 1);
+        assert!(ss[0].get("open").is_none());
+    }
+
+    #[test]
+    fn export_failure_is_not_fatal_and_backs_off() {
+        let d = TempDir::new("exp-fail");
+        let blocker = d.0.join("blocker");
+        fs::write(&blocker, "x").unwrap();
+        let cfg = Config {
+            export_dir: Some(blocker.join("sub")), // parent is a file
+            export_interval_min: 1,
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        run_x(&mut e, 1000, 1, || Foreground::None);
+        assert_eq!(e.export_fails, 1);
+        assert!(e.export_dirty);
+        assert_eq!(e.export_at, 1000 + 120);
+        // Exact backoff sequence, capped at an hour.
+        for (n, wait) in [240u64, 480, 960, 1920, 3600, 3600, 3600]
+            .into_iter()
+            .enumerate()
+        {
+            let t = e.export_at;
+            run_x(&mut e, t, 1, || Foreground::None);
+            assert_eq!(e.export_fails, n as u32 + 2);
+            assert!(e.export_dirty);
+            assert_eq!(e.export_at, t + wait);
+        }
+    }
+
+    static STUCK_GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static STUCK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn stuck_writer(dir: &std::path::Path, p: &export::Payload) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        STUCK_CALLS.fetch_add(1, SeqCst);
+        while !STUCK_GATE.load(SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        export::write_payload(dir, p)
+    }
+
+    #[test]
+    fn stuck_writer_is_logged_and_detached_without_final_export() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let d = TempDir::new("exp-stuck");
+        let (mut e, _out) = export_engine(&d, 1);
+        e.export_writer = stuck_writer;
+        e.export_join_wait_ms = 50;
+        e.tick(1000, exe(1, ALPHA));
+        assert!(!e.export_slow_logged);
+        run_for(&mut e, 1001, 700, || exe(1, ALPHA));
+        assert!(e.export_slow_logged, "slow export noted after 10 minutes");
+        e.shutdown();
+        assert!(e.export_job.is_none(), "stuck writer detached");
+        assert_eq!(
+            STUCK_CALLS.load(SeqCst),
+            1,
+            "no final export after detaching"
+        );
+        STUCK_GATE.store(true, SeqCst);
+    }
+
+    static FLAKY_FAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+    fn flaky_writer(dir: &std::path::Path, p: &export::Payload) -> std::io::Result<()> {
+        if FLAKY_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(std::io::Error::other("share offline"))
+        } else {
+            export::write_payload(dir, p)
+        }
+    }
+
+    #[test]
+    fn backoff_does_not_persist_after_recovery() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let d = TempDir::new("exp-recover");
+        let (mut e, out) = export_engine(&d, 1);
+        e.export_writer = flaky_writer;
+        run_x(&mut e, 1000, 1, || Foreground::None);
+        assert_eq!((e.export_fails, e.export_at), (1, 1120));
+        run_x(&mut e, 1120, 1, || Foreground::None);
+        assert_eq!((e.export_fails, e.export_at), (2, 1120 + 240));
+        FLAKY_FAIL.store(false, SeqCst);
+        run_x(&mut e, 1360, 1, || Foreground::None);
+        assert_eq!(e.export_fails, 0);
+        assert_eq!(e.export_at, 1360 + 60);
+        assert!(out.join("sessions.json").exists());
+    }
+
+    #[test]
+    fn interval_is_clamped() {
+        let d = TempDir::new("exp-clamp");
+        let (mut e, _) = export_engine(&d, 0);
+        assert_eq!(e.export_wait(), 60);
+        e.cfg.export_interval_min = u64::MAX;
+        e.export_fails = u32::MAX;
+        assert_eq!(e.export_wait(), 10080 * 60);
+    }
+
+    #[test]
+    fn relative_export_dir_is_ignored() {
+        let d = TempDir::new("exp-relative");
+        let cfg = Config {
+            export_dir: Some(PathBuf::from("relative-out")),
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        assert!(e.cfg.export_dir.is_none());
+        run_x(&mut e, 1000, 50, || exe(1, ALPHA));
+        e.shutdown();
+        assert!(e.export_job.is_none());
+    }
+
+    #[test]
+    fn no_shutdown_export_before_first_tick() {
+        let d = TempDir::new("exp-notick");
+        let (mut e, out) = export_engine(&d, 1);
+        e.shutdown();
+        assert!(!out.exists());
+    }
+
+    static GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static SLOW_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn slow_writer(dir: &std::path::Path, p: &export::Payload) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        SLOW_CALLS.fetch_add(1, SeqCst);
+        while !GATE.load(SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        export::write_payload(dir, p)
+    }
+
+    #[test]
+    fn slow_export_does_not_block_or_split_and_is_single_flight() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let d = TempDir::new("exp-slow");
+        let (mut e, out) = export_engine(&d, 1);
+        e.export_writer = slow_writer;
+        // The startup export blocks in the writer; polling carries on.
+        run_for(&mut e, 1000, 300, || exe(1, ALPHA));
+        run_for(&mut e, 1300, 100, || Foreground::None); // closes via merge gap
+        assert_eq!(
+            SLOW_CALLS.load(SeqCst),
+            1,
+            "no second export while in flight"
+        );
+        assert!(e.export_job.is_some());
+        let r = records(&d);
+        assert_eq!(r.len(), 1, "one session, not split by the slow export");
+        assert_eq!((r[0].start_utc, r[0].active_s), (1000, 300));
+        // Release the writer; the result is collected on a later tick.
+        GATE.store(true, SeqCst);
+        while !e.export_job.as_ref().unwrap().is_finished() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        e.tick(2000, Foreground::None);
+        e.shutdown(); // waits for any follow-up export
+        assert!(out.join("sessions.json").exists());
+        assert_eq!(e.export_fails, 0);
     }
 
     #[test]

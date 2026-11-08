@@ -27,10 +27,7 @@ fn main() -> ExitCode {
         Some("autostart") => ExitCode::from(gametime::autostart::cli(&args)),
         Some("scan") => gametime::cli_info::scan(&args[1..]),
         Some("status") => gametime::cli_info::status(&args[1..]),
-        Some("export") => {
-            println!("not implemented yet");
-            ExitCode::SUCCESS
-        }
+        Some("export") => gametime::export::cli(&args[1..]),
         Some("run") => {
             if args[1..].iter().any(|a| a != "--verbose") {
                 eprintln!("{USAGE}");

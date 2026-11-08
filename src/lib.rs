@@ -2,6 +2,7 @@ pub mod autostart;
 pub mod cli_info;
 pub mod config;
 pub mod detect;
+pub mod export;
 pub mod log;
 pub mod session;
 pub mod stats;
