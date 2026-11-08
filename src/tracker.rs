@@ -93,6 +93,12 @@ pub struct Engine {
     export_job: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     /// Performs the export writes (replaceable by tests).
     export_writer: ExportWriter,
+    /// Tick time at which the export in flight started.
+    export_started: u64,
+    /// The slow-export warning was already logged for this job.
+    export_slow_logged: bool,
+    /// Bounded wait for the writer at shutdown (ms).
+    export_join_wait_ms: u64,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
     #[cfg(test)]
@@ -141,6 +147,9 @@ impl Engine {
             export_fails: 0,
             export_job: None,
             export_writer: export::write_payload,
+            export_started: 0,
+            export_slow_logged: false,
+            export_join_wait_ms: EXPORT_JOIN_WAIT_MS,
             last_seen: 0,
             #[cfg(test)]
             match_calls: 0,
@@ -226,9 +235,10 @@ impl Engine {
         if !self.retry.is_empty() {
             self.retry_appends(self.last_seen, true);
         }
-        self.wait_export();
+        // A stuck writer was detached: skip the final export (it would stall too).
+        let writer_ok = self.wait_export();
         // No tick ever ran: no meaningful timestamp, nothing to add.
-        if self.export_dirty && self.last_seen != 0 && self.cfg.export_dir.is_some() {
+        if writer_ok && self.export_dirty && self.last_seen != 0 && self.cfg.export_dir.is_some() {
             let now = win32::now_utc_secs().max(self.last_seen);
             self.start_export(now);
             self.wait_export();
@@ -236,18 +246,20 @@ impl Engine {
     }
 
     /// Wait (bounded) for the export in flight, then collect its result.
-    fn wait_export(&mut self) {
+    /// Returns false if a stuck writer had to be detached.
+    fn wait_export(&mut self) -> bool {
         let mut waited = 0;
         while matches!(&self.export_job, Some(j) if !j.is_finished()) {
-            if waited >= EXPORT_JOIN_WAIT_MS {
+            if waited >= self.export_join_wait_ms {
                 log::log_line("auto-export still running at shutdown; giving up on it");
                 self.export_job = None; // detach
-                return;
+                return false;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            waited += 20;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 5;
         }
         self.reap_export(self.last_seen);
+        true
     }
 
     /// Collect the result of a finished export writer.
@@ -265,7 +277,12 @@ impl Engine {
 
     fn export_done(&mut self, res: std::io::Result<()>, now: u64) {
         match res {
-            Ok(()) => self.export_fails = 0,
+            Ok(()) => {
+                self.export_fails = 0;
+                // Don't keep a backed-off delay after recovery.
+                let next = self.export_started.saturating_add(self.export_wait());
+                self.export_at = self.export_at.min(next);
+            }
             Err(e) => {
                 self.export_fails = self.export_fails.saturating_add(1);
                 self.export_dirty = true;
@@ -284,6 +301,10 @@ impl Engine {
         }
         self.reap_export(now);
         if self.export_job.is_some() {
+            if !self.export_slow_logged && now.saturating_sub(self.export_started) > 600 {
+                self.export_slow_logged = true;
+                log::log_line("auto-export has been in flight for over 10 minutes");
+            }
             return; // at most one export in flight
         }
         let wait = self.export_wait();
@@ -327,6 +348,8 @@ impl Engine {
             }
         };
         self.export_dirty = false;
+        self.export_started = now;
+        self.export_slow_logged = false;
         self.export_at = now.saturating_add(self.export_wait());
         let write = self.export_writer;
         let spawned = std::thread::Builder::new()
@@ -554,7 +577,7 @@ fn write_err_file(msg: &str) {
 }
 
 /// Run the tracker until the stop event is signaled. Returns the exit code.
-pub fn run(verbose: bool) -> i32 {
+pub fn run(verbose: bool, heal_autostart: bool) -> i32 {
     let dir = match config::data_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -568,9 +591,17 @@ pub fn run(verbose: bool) -> i32 {
     }));
 
     let cfg = match Config::load_or_create(&dir) {
-        Ok(c) => c,
+        Ok(c) => {
+            if heal_autostart {
+                crate::autostart::self_heal(&c);
+            }
+            c
+        }
         Err(e) => {
             log::log_line(&format!("config error ({e}); using defaults"));
+            if heal_autostart {
+                log::log_line("config unreadable; not touching Run entry");
+            }
             Config::default()
         }
     };
@@ -824,6 +855,66 @@ mod tests {
             assert!(e.export_dirty);
             assert_eq!(e.export_at, t + wait);
         }
+    }
+
+    static STUCK_GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static STUCK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn stuck_writer(dir: &std::path::Path, p: &export::Payload) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        STUCK_CALLS.fetch_add(1, SeqCst);
+        while !STUCK_GATE.load(SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        export::write_payload(dir, p)
+    }
+
+    #[test]
+    fn stuck_writer_is_logged_and_detached_without_final_export() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let d = TempDir::new("exp-stuck");
+        let (mut e, _out) = export_engine(&d, 1);
+        e.export_writer = stuck_writer;
+        e.export_join_wait_ms = 50;
+        e.tick(1000, exe(1, ALPHA));
+        assert!(!e.export_slow_logged);
+        run_for(&mut e, 1001, 700, || exe(1, ALPHA));
+        assert!(e.export_slow_logged, "slow export noted after 10 minutes");
+        e.shutdown();
+        assert!(e.export_job.is_none(), "stuck writer detached");
+        assert_eq!(
+            STUCK_CALLS.load(SeqCst),
+            1,
+            "no final export after detaching"
+        );
+        STUCK_GATE.store(true, SeqCst);
+    }
+
+    static FLAKY_FAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+    fn flaky_writer(dir: &std::path::Path, p: &export::Payload) -> std::io::Result<()> {
+        if FLAKY_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(std::io::Error::other("share offline"))
+        } else {
+            export::write_payload(dir, p)
+        }
+    }
+
+    #[test]
+    fn backoff_does_not_persist_after_recovery() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let d = TempDir::new("exp-recover");
+        let (mut e, out) = export_engine(&d, 1);
+        e.export_writer = flaky_writer;
+        run_x(&mut e, 1000, 1, || Foreground::None);
+        assert_eq!((e.export_fails, e.export_at), (1, 1120));
+        run_x(&mut e, 1120, 1, || Foreground::None);
+        assert_eq!((e.export_fails, e.export_at), (2, 1120 + 240));
+        FLAKY_FAIL.store(false, SeqCst);
+        run_x(&mut e, 1360, 1, || Foreground::None);
+        assert_eq!(e.export_fails, 0);
+        assert_eq!(e.export_at, 1360 + 60);
+        assert!(out.join("sessions.json").exists());
     }
 
     #[test]

@@ -1,8 +1,11 @@
+pub mod autostart;
+pub mod cli_info;
 pub mod config;
 pub mod detect;
 pub mod export;
 pub mod log;
 pub mod session;
+pub mod stats;
 pub mod steam;
 pub mod store;
 pub mod tracker;
