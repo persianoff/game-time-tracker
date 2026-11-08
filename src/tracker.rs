@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use crate::config::{self, Config};
 use crate::detect::{self, GameDb, Source};
+use crate::export;
 use crate::log;
 use crate::session::{Params, Session, Tracker};
 use crate::store::{CloseError, SessionRecord, Store};
@@ -76,6 +77,12 @@ pub struct Engine {
     need_recover: bool,
     last_ckpt: Option<u64>,
     last_scan: Option<u64>,
+    /// A session closed (or an append recovered) since the last export.
+    export_dirty: bool,
+    /// Earliest time of the next auto-export attempt.
+    export_at: u64,
+    /// Consecutive failed auto-exports (drives the backoff).
+    export_fails: u32,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
     #[cfg(test)]
@@ -114,6 +121,9 @@ impl Engine {
             need_recover: false,
             last_ckpt: None,
             last_scan: None,
+            export_dirty: true,
+            export_at: 0,
+            export_fails: 0,
             last_seen: 0,
             #[cfg(test)]
             match_calls: 0,
@@ -186,6 +196,7 @@ impl Engine {
         self.maybe_checkpoint(now);
         // Last, so a slow scan never delays a poll's clock reading.
         self.maybe_rescan(now);
+        self.maybe_export(now);
     }
 
     /// Close the open session (stop/shutdown) and make a last attempt at any
@@ -198,6 +209,59 @@ impl Engine {
         if !self.retry.is_empty() {
             self.retry_appends(self.last_seen, true);
         }
+        if self.export_dirty {
+            self.export_now(self.last_seen);
+        }
+    }
+
+    /// Auto-export when `export_dir` is set, the interval has elapsed and
+    /// something changed (a session closed, or one is still open and growing).
+    fn maybe_export(&mut self, now: u64) {
+        if self.cfg.export_dir.is_none() {
+            return;
+        }
+        let wait = self.export_wait();
+        if self.export_at > now + wait {
+            self.export_at = now; // clock went backwards
+        }
+        if now < self.export_at {
+            return;
+        }
+        if !self.export_dirty && self.tracker.is_idle() {
+            self.export_at = now + wait;
+            return;
+        }
+        self.export_now(now);
+    }
+
+    /// Interval between attempts: configured (min 1 minute), doubled per
+    /// consecutive failure up to an hour (or the interval, if longer).
+    fn export_wait(&self) -> u64 {
+        let base = self.cfg.export_interval_min.max(1) * 60;
+        (base << self.export_fails.min(6)).min(base.max(3600))
+    }
+
+    /// Write the export files now. Errors are logged, never fatal.
+    fn export_now(&mut self, now: u64) {
+        let Some(dir) = &self.cfg.export_dir else {
+            return;
+        };
+        let open = self
+            .tracker
+            .current()
+            .map(|s| self.record(&s, String::new()));
+        match export::write_auto(dir, &self.store, open.as_ref(), now) {
+            Ok(()) => {
+                self.export_dirty = false;
+                self.export_fails = 0;
+            }
+            Err(e) => {
+                self.export_fails = self.export_fails.saturating_add(1);
+                log::log_line(&format!("auto-export to {} failed: {e}", dir.display()));
+            }
+        }
+        self.export_at = now + self.export_wait();
+        win32::trim_working_set();
     }
 
     fn record(&self, s: &Session<GameKey>, exe: String) -> SessionRecord {
@@ -212,6 +276,7 @@ impl Engine {
     }
 
     fn commit(&mut self, sess: Session<GameKey>, exe: String, now: u64) {
+        self.export_dirty = true;
         let rec = self.record(&sess, exe);
         let owns = self.slot_ok
             && matches!(&self.ckpt, Some((g, st)) if *g == sess.game && *st == sess.start);
@@ -282,10 +347,13 @@ impl Engine {
                 continue;
             }
             match self.store.append(&p.rec) {
-                Ok(()) => log::log_line(&format!(
-                    "append retry succeeded for {} start={}",
-                    p.rec.game, p.rec.start_utc
-                )),
+                Ok(()) => {
+                    self.export_dirty = true;
+                    log::log_line(&format!(
+                        "append retry succeeded for {} start={}",
+                        p.rec.game, p.rec.start_utc
+                    ));
+                }
                 Err(e) => {
                     p.attempts += 1;
                     p.next_at = now + RETRY_EVERY_S;
@@ -551,6 +619,116 @@ mod tests {
         for t in t0..t0 + n {
             e.tick(t, fg());
         }
+    }
+
+    fn export_engine(d: &TempDir, interval_min: u64) -> (Engine, PathBuf) {
+        let out = d.0.join("export");
+        let cfg = Config {
+            export_dir: Some(out.clone()),
+            export_interval_min: interval_min,
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        (e, out)
+    }
+
+    fn export_json(out: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(out.join("sessions.json")).unwrap()).unwrap()
+    }
+
+    fn export_count(out: &std::path::Path) -> usize {
+        export_json(out)["sessions"].as_array().unwrap().len()
+    }
+
+    #[test]
+    fn no_export_without_export_dir() {
+        let d = TempDir::new("noexport");
+        let mut e = engine(&d, true);
+        run_for(&mut e, 1000, 200, || exe(1, ALPHA));
+        e.shutdown();
+        assert!(!d.0.join("export").exists());
+        assert!(!d.0.join("sessions.json").exists());
+    }
+
+    #[test]
+    fn auto_export_creates_dir_and_includes_open_session() {
+        let d = TempDir::new("exp-open");
+        let (mut e, out) = export_engine(&d, 1);
+        run_for(&mut e, 1000, 30, || exe(1, ALPHA));
+        // The first tick exports immediately (startup state).
+        assert!(out.join("gametime.ics").exists());
+        assert_eq!(export_count(&out), 0);
+        // One interval later the still-open session shows up, flagged.
+        run_for(&mut e, 1030, 60, || exe(1, ALPHA));
+        let v = export_json(&out);
+        let ss = v["sessions"].as_array().unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss[0]["game"], "Alpha");
+        assert_eq!(ss[0]["open"], true);
+        // The calendar has closed sessions only.
+        let ics = fs::read_to_string(out.join("gametime.ics")).unwrap();
+        assert!(!ics.contains("BEGIN:VEVENT"));
+    }
+
+    #[test]
+    fn auto_export_waits_for_interval_and_dirty_flag() {
+        let d = TempDir::new("exp-dirty");
+        let (mut e, out) = export_engine(&d, 5);
+        run_for(&mut e, 1000, 1, || Foreground::None); // startup export
+        assert_eq!(e.export_at, 1300);
+        assert!(!e.export_dirty);
+        // A session closes: dirty, but nothing is written before the interval.
+        run_for(&mut e, 1001, 20, || exe(1, ALPHA));
+        run_for(&mut e, 1021, 100, || Foreground::None);
+        assert!(e.export_dirty);
+        run_for(&mut e, 1121, 170, || Foreground::None);
+        assert_eq!(export_count(&out), 0);
+        run_for(&mut e, 1291, 20, || Foreground::None);
+        assert_eq!(export_count(&out), 1);
+        assert!(!e.export_dirty);
+        assert!(export_json(&out)["sessions"][0].get("open").is_none());
+        let ics = fs::read_to_string(out.join("gametime.ics")).unwrap();
+        assert!(ics.contains("BEGIN:VEVENT"));
+        // Idle and clean: the next due time passes without a rewrite.
+        let at = e.export_at;
+        fs::remove_file(out.join("sessions.json")).unwrap();
+        run_for(&mut e, at, 10, || Foreground::None);
+        assert!(!out.join("sessions.json").exists());
+        assert_eq!(e.export_at, at + 300);
+    }
+
+    #[test]
+    fn shutdown_exports_when_dirty() {
+        let d = TempDir::new("exp-shutdown");
+        let (mut e, out) = export_engine(&d, 60);
+        run_for(&mut e, 1000, 40, || exe(1, ALPHA));
+        e.shutdown();
+        let v = export_json(&out);
+        let ss = v["sessions"].as_array().unwrap();
+        assert_eq!(ss.len(), 1);
+        assert!(ss[0].get("open").is_none());
+    }
+
+    #[test]
+    fn export_failure_is_not_fatal_and_backs_off() {
+        let d = TempDir::new("exp-fail");
+        let blocker = d.0.join("blocker");
+        fs::write(&blocker, "x").unwrap();
+        let cfg = Config {
+            export_dir: Some(blocker.join("sub")), // parent is a file
+            export_interval_min: 1,
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        run_for(&mut e, 1000, 1, || Foreground::None);
+        assert_eq!(e.export_fails, 1);
+        assert!(e.export_dirty);
+        assert_eq!(e.export_at, 1000 + 120);
+        run_for(&mut e, 1001, 2000, || Foreground::None);
+        assert!(e.export_fails >= 2);
+        assert!(e.export_wait() <= 3600);
     }
 
     #[test]

@@ -24,10 +24,11 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Some("scan" | "status" | "export" | "autostart") => {
+        Some("scan" | "status" | "autostart") => {
             println!("not implemented yet");
             ExitCode::SUCCESS
         }
+        Some("export") => gametime::export::cli(&args[1..]),
         Some("run") => {
             if args[1..].iter().any(|a| a != "--verbose") {
                 eprintln!("{USAGE}");
