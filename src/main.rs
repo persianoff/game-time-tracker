@@ -24,9 +24,10 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+        Some("autostart") => ExitCode::from(gametime::autostart::cli(&args)),
         Some("scan") => gametime::cli_info::scan(&args[1..]),
         Some("status") => gametime::cli_info::status(&args[1..]),
-        Some("export" | "autostart") => {
+        Some("export") => {
             println!("not implemented yet");
             ExitCode::SUCCESS
         }
@@ -36,7 +37,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             let verbose = args.len() > 1;
-            ExitCode::from(gametime::tracker::run(verbose) as u8)
+            ExitCode::from(gametime::tracker::run(verbose, false) as u8)
         }
         Some("--help" | "-h" | "help") | None => {
             println!("{USAGE}");

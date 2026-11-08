@@ -1,3 +1,4 @@
+pub mod autostart;
 pub mod cli_info;
 pub mod config;
 pub mod detect;

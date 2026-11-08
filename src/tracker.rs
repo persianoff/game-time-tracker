@@ -411,7 +411,7 @@ fn write_err_file(msg: &str) {
 }
 
 /// Run the tracker until the stop event is signaled. Returns the exit code.
-pub fn run(verbose: bool) -> i32 {
+pub fn run(verbose: bool, heal_autostart: bool) -> i32 {
     let dir = match config::data_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -425,9 +425,17 @@ pub fn run(verbose: bool) -> i32 {
     }));
 
     let cfg = match Config::load_or_create(&dir) {
-        Ok(c) => c,
+        Ok(c) => {
+            if heal_autostart {
+                crate::autostart::self_heal(&c);
+            }
+            c
+        }
         Err(e) => {
             log::log_line(&format!("config error ({e}); using defaults"));
+            if heal_autostart {
+                log::log_line("config unreadable; not touching Run entry");
+            }
             Config::default()
         }
     };

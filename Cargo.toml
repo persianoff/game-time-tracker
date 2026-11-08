@@ -11,10 +11,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "gametime"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "gametime-tracker"
 path = "src/tracker_bin.rs"
+test = false
 
 [dependencies]
 # 0.59: prebuilt GNU import libs; 0.61+ needs dlltool+as on windows-gnu
