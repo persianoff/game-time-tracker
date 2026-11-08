@@ -50,14 +50,12 @@ Test:
 
 ## 4. Autostart
 
-Start a game first and keep it focused through the `stop` step below, so there is an open session to save.
-
 - [ ] `.\gametime.exe autostart on`: the tracker starts at once (`Get-Process gametime-tracker`), and **Task Manager -> Startup apps** lists GameTime as Enabled.
 - [ ] Registry check (first byte of the StartupApproved value: even = enabled, odd = disabled; a missing value counts as enabled):
 
   ```powershell
   (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').GameTime
-  (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run').GameTime[0]
+  $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' -ErrorAction SilentlyContinue).GameTime; if ($v) { $v[0] } else { 'missing (= enabled)' }
   ```
 
   The first prints the quoted path to `gametime-tracker.exe`.
@@ -69,8 +67,8 @@ Start a game first and keep it focused through the `stop` step below, so there i
   ```
 
 - [ ] Move the exe: `.\gametime.exe stop`, move the whole folder (for example to `C:\Tools\GameTime2`), `cd` into it, run `.\gametime-tracker.exe` once, then `.\gametime.exe autostart status`. It must show `matches: true` and the Run value must point to the new path. Repeat the same sequence to move it back (stop, move, cd, `.\gametime-tracker.exe`, `autostart status`).
-- [ ] Disabled state: in Task Manager -> Startup apps, **Disable** GameTime (the StartupApproved first byte is now odd). Run `.\gametime.exe stop`, then start the tracker with `.\gametime-tracker.exe` (not `autostart on`, which re-enables autostart). It must stay Disabled in Task Manager and `autostart status` should show it as disabled.
-- [ ] Re-enable it in Task Manager. With a game focused, run `.\gametime.exe stop`: it prints `stopped`, the process exits, and the open session is saved (visible in `status`).
+- [ ] Disabled state: in Task Manager -> Startup apps, **Disable** GameTime (the StartupApproved first byte is now odd). Run `.\gametime.exe stop`, then start the tracker with `.\gametime-tracker.exe`. It must stay Disabled in Task Manager and `autostart status` should show it as disabled.
+- [ ] Re-enable it in Task Manager. Start a game, alt-tab to the console and within 60 s run `.\gametime.exe stop`. The session is saved, see `log.txt` / `status`.
 - [ ] `.\gametime.exe autostart off`: the Run value is gone (`autostart status` shows `registered: (none)`) and the entry disappears from Task Manager.
 - [ ] Optional: confirm that up to 30 s lost at logoff or shutdown mid-game is recovered at next start (accepted limitation).
 

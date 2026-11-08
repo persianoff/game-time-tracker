@@ -19,7 +19,7 @@ A tiny background tracker for Windows that records how long you play games. It o
 
 ## Install
 
-There is no installer. Copy **both exes into one folder** that you will not move later, for example `C:\Tools\GameTime\`. `.\gametime.exe autostart on` looks for `gametime-tracker.exe` next to `gametime.exe`. The examples below are run from that folder, so they use `.\gametime.exe`. To call `gametime` from anywhere, add the folder to your PATH (for example `setx PATH "%PATH%;C:\Tools\GameTime"`, then open a new console).
+There is no installer. Copy **both exes into one folder** that you will not move later, for example `C:\Tools\GameTime\`. `.\gametime.exe autostart on` looks for `gametime-tracker.exe` next to `gametime.exe`. The examples below are run from that folder, so they use `.\gametime.exe`. To call `gametime` from anywhere, add the folder to your PATH (for example `[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';C:\Tools\GameTime', 'User')`), then open a new console.
 
 ## First run
 
@@ -29,7 +29,7 @@ There is no installer. Copy **both exes into one folder** that you will not move
 .\gametime.exe status
 ```
 
-`autostart on` writes the per-user Run value `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GameTime`. It needs no admin rights. The entry is visible in **Task Manager -> Startup apps**, where you can disable it. The tracker respects that choice and does not re-enable it (but `.\gametime.exe autostart on` does re-enable autostart).
+`autostart on` writes the per-user Run value `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GameTime`. It needs no admin rights. The entry is visible in **Task Manager -> Startup apps**, where you can disable it. The tracker respects that choice and does not re-enable it. Running `.\gametime.exe autostart on` again re-registers the Run value and sets `autostart: true`, but it does not undo a Task Manager disable; it prints a warning instead.
 
 Self-heal: at every start, `gametime-tracker.exe` (never `gametime run`) rewrites the Run value to its own path if it differs. It does so only when `autostart` is `true` in the config, the config could be read, and the Startup entry is not disabled in Task Manager. To move the exes, stop the tracker, move the folder, and launch `gametime-tracker.exe` once from the new place.
 
