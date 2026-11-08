@@ -6,42 +6,32 @@
 <meta name="color-scheme" content="light dark">
 <title>GameTime</title>
 <style>
-/* ---- Theme tokens (dataviz reference palette; light default, dark by OS or ?theme=dark) ---- */
-:root {
-  color-scheme: light;
-  --bg: #f9f9f7; --panel: #fcfcfb; --text: #0b0b0b; --text2: #52514e; --muted: #898781;
-  --line: #e1e0d9; --axis: #c3c2b7; --accent: #2a78d6; --bad: #d03b3b; --good: #006300;
-  --shadow: rgba(11, 11, 11, 0.18);
-  /* categorical slots: blue, orange, aqua, yellow, magenta, green, violet, red */
-  --c0: #2a78d6; --c1: #eb6834; --c2: #1baf7a; --c3: #eda100; --c4: #e87ba4; --c5: #008300; --c6: #6250d6; --c7: #e34948;
-  --cf0: #fff; --cf1: #fff; --cf2: #fff; --cf3: #0b0b0b; --cf4: #fff; --cf5: #fff; --cf6: #fff; --cf7: #fff;
-  --other: #b5b4ab;
-  /* sequential (blue, one hue, light -> dark = more) and the ink on each step */
-  --s0: #f1f0ec; --s1: #cde2fb; --s2: #9ec5f4; --s3: #6da7ec; --s4: #3987e5; --s5: #256abf; --s6: #184f95; --s7: #0d366b;
-  --sf0: #52514e; --sf1: #0b0b0b; --sf2: #0b0b0b; --sf3: #0b0b0b; --sf4: #fff; --sf5: #fff; --sf6: #fff; --sf7: #fff;
+/* ---- Theme tokens (dataviz reference palette). One block: light-dark(light, dark).
+   Follows the OS by default; ?theme=dark|light (data-theme) overrides. ---- */
+:root { color-scheme: light dark;
+  --bg: light-dark(#f9f9f7, #0d0d0d); --panel: light-dark(#fcfcfb, #1a1a19);
+  --text: light-dark(#0b0b0b, #f0efec); --text2: light-dark(#52514e, #c3c2b7); --muted: #898781;
+  --line: light-dark(#e1e0d9, #2c2c2a); --axis: light-dark(#c3c2b7, #383835);
+  --accent: light-dark(#2a78d6, #3987e5);            /* rings, borders (non-text) */
+  --accent-fill: light-dark(#256abf, #1c5cab); --onaccent: #ffffff; /* filled controls with text, >= 4.5:1 */
+  --bad: light-dark(#d03b3b, #e66767); --good: light-dark(#006300, #0ca30c);
+  --shadow: light-dark(rgba(11, 11, 11, 0.18), rgba(0, 0, 0, 0.6));
+  /* categorical slots (by all-time rank): blue, orange, aqua, yellow, magenta, green, violet, red;
+     --cfN is the label ink for slot N, chosen per theme for >= 4.5:1 (checked by the self-test) */
+  --c0: light-dark(#2a78d6, #3987e5); --c1: light-dark(#eb6834, #d95926); --c2: light-dark(#1baf7a, #199e70); --c3: light-dark(#eda100, #c98500);
+  --c4: light-dark(#e87ba4, #d55181); --c5: #008300; --c6: light-dark(#6250d6, #9085e9); --c7: light-dark(#e34948, #e66767);
+  --cf0: light-dark(#000000, #0b0b0b); --cf1: #0b0b0b; --cf2: #0b0b0b; --cf3: #0b0b0b; --cf4: #0b0b0b;
+  --cf5: #ffffff; --cf6: light-dark(#ffffff, #0b0b0b); --cf7: #0b0b0b;
+  --other: light-dark(#b5b4ab, #5a5953); --cfo: light-dark(#0b0b0b, #ffffff);
+  /* sequential (blue, one hue; light = more in dark mode) and the ink on each step */
+  --s0: light-dark(#f1f0ec, #242422); --s1: light-dark(#b7d3f6, #0d366b); --s2: light-dark(#86b6ef, #184f95); --s3: light-dark(#5598e7, #1c5cab);
+  --s4: light-dark(#3987e5, #256abf); --s5: light-dark(#256abf, #3987e5); --s6: light-dark(#184f95, #6da7ec); --s7: light-dark(#0d366b, #9ec5f4);
+  --sf0: light-dark(#52514e, #c3c2b7); --sf1: light-dark(#0b0b0b, #ffffff); --sf2: light-dark(#0b0b0b, #ffffff);
+  --sf3: light-dark(#0b0b0b, #ffffff); --sf4: light-dark(#0b0b0b, #ffffff); --sf5: light-dark(#ffffff, #0b0b0b);
+  --sf6: light-dark(#ffffff, #0b0b0b); --sf7: light-dark(#ffffff, #0b0b0b);
 }
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #0d0d0d; --panel: #1a1a19; --text: #f0efec; --text2: #c3c2b7; --muted: #898781;
-  --line: #2c2c2a; --axis: #383835; --accent: #3987e5; --bad: #e66767; --good: #0ca30c;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --c0: #3987e5; --c1: #d95926; --c2: #199e70; --c3: #c98500; --c4: #d55181; --c5: #008300; --c6: #9085e9; --c7: #e66767;
-  --other: #5a5953;
-  --s0: #242422; --s1: #0d366b; --s2: #184f95; --s3: #1c5cab; --s4: #256abf; --s5: #3987e5; --s6: #6da7ec; --s7: #9ec5f4;
-  --sf0: #c3c2b7; --sf1: #fff; --sf2: #fff; --sf3: #fff; --sf4: #fff; --sf5: #0b0b0b; --sf6: #0b0b0b; --sf7: #0b0b0b;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #0d0d0d; --panel: #1a1a19; --text: #f0efec; --text2: #c3c2b7; --muted: #898781;
-    --line: #2c2c2a; --axis: #383835; --accent: #3987e5; --bad: #e66767; --good: #0ca30c;
-    --shadow: rgba(0, 0, 0, 0.6);
-    --c0: #3987e5; --c1: #d95926; --c2: #199e70; --c3: #c98500; --c4: #d55181; --c5: #008300; --c6: #9085e9; --c7: #e66767;
-    --other: #5a5953;
-    --s0: #242422; --s1: #0d366b; --s2: #184f95; --s3: #1c5cab; --s4: #256abf; --s5: #3987e5; --s6: #6da7ec; --s7: #9ec5f4;
-    --sf0: #c3c2b7; --sf1: #fff; --sf2: #fff; --sf3: #fff; --sf4: #fff; --sf5: #0b0b0b; --sf6: #0b0b0b; --sf7: #0b0b0b;
-  }
-}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
@@ -68,7 +58,7 @@ section.panel { margin-top: 14px; }
 .seg button { border-radius: 0; margin-left: -1px; }
 .seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
 .seg button:last-child { border-radius: 0 6px 6px 0; }
-.seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; position: relative; }
+.seg button[aria-pressed="true"] { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--onaccent); }
 .nav { display: inline-flex; gap: 6px; align-items: center; }
 #period { min-width: 9.5em; text-align: center; font-weight: 600; }
 .chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--accent); border-radius: 14px; padding: 2px 4px 2px 10px; font-size: 13px; }
@@ -97,7 +87,7 @@ button.tile:hover { border-color: var(--accent); }
 .day.out { opacity: 0.4; }
 .day.sel { box-shadow: inset 0 0 0 2px var(--text); }
 .dn { font-size: 12px; font-weight: 600; align-self: flex-start; min-width: 1.6em; text-align: center; border-radius: 10px; }
-.day.today .dn { background: var(--accent); color: #fff; padding: 0 4px; }
+.day.today .dn { background: var(--accent-fill); color: var(--onaccent); padding: 0 4px; }
 .dt { font-size: 12px; font-weight: 600; margin: 2px 0; white-space: nowrap; }
 .bar { display: flex; gap: 2px; height: 7px; background: var(--panel); border-radius: 4px; padding: 1px; min-height: 7px; }
 .bar i { display: block; height: 100%; min-width: 2px; border-radius: 2px; }
@@ -107,6 +97,7 @@ button.tile:hover { border-color: var(--accent); }
 .lchip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 12px; border-radius: 12px; }
 .lchip[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 td .sw { margin-right: 6px; }
+#dayTitle:focus { outline: none; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
 
 /* day timeline */
@@ -116,9 +107,9 @@ td .sw { margin-right: 6px; }
 .tick.first span { transform: none; } .tick.lastt span { transform: translateX(-100%); }
 .blk { position: absolute; top: 5px; bottom: 5px; min-width: 4px; padding: 0 5px; border: 0; border-radius: 4px;
        box-shadow: 0 0 0 1px var(--panel); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; text-align: left; }
-.blk.open { background-image: repeating-linear-gradient(135deg, rgba(255,255,255,0.4) 0 4px, transparent 4px 9px);
+.blk.open { background-image: repeating-linear-gradient(135deg, color-mix(in srgb, var(--panel) 28%, transparent) 0 4px, transparent 4px 9px);
             outline: 2px dashed var(--text); outline-offset: -2px; }
-.blk:hover:not(:disabled), .blk:focus-visible { filter: brightness(1.12); border: 0; }
+.blk:hover, .blk:focus-visible { filter: brightness(1.12); }
 .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 8px; border: 1px solid var(--bad); color: var(--bad); margin-left: 6px; }
 
 /* tables */
@@ -238,7 +229,7 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
     </section>
 
     <section class="panel" id="dayPanel" aria-labelledby="dayTitle" hidden>
-      <div class="phead"><h2 id="dayTitle"></h2>
+      <div class="phead"><h2 id="dayTitle" tabindex="-1"></h2>
         <span><span class="meta" id="dayMeta"></span> <button type="button" id="dayClose" aria-label="Close day timeline">&times; Close</button></span></div>
       <div id="dayBody" data-host></div>
     </section>
@@ -266,10 +257,9 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 var GT = {};
 GT.agg = (function () {
   var DAY_MS = 86400000;
-  // Categorical slots 1-8 (light-mode values of the validated dataviz palette:
-  // blue, orange, aqua, yellow, magenta, green, violet, red). The page themes
-  // them via CSS variables --c0..--c7; the index is what matters.
-  var PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
+  // Number of categorical colour slots. Game colours are assigned by all-time
+  // rank (see rankGames); the page maps slot N to the CSS variables --cN / --cfN.
+  var COLOR_SLOTS = 8;
 
   function pad2(n) { return (n < 10 ? "0" : "") + n; }
 
@@ -352,7 +342,21 @@ GT.agg = (function () {
       var s = validateSession(doc.sessions[i]);
       if (s) ok.push(s); else skipped++;
     }
-    return { sessions: ok, skipped: skipped, generated: parseTime(doc.generated) };
+    return { sessions: dedupe(ok), skipped: skipped, generated: parseTime(doc.generated) };
+  }
+
+  // Collapses records of the same session (same game + start instant), which can
+  // appear twice when an open (in-progress) record and its closed record coexist.
+  // Prefers the non-open record, else the later end. Order of first appearance is kept.
+  function dedupe(sessions) {
+    var seen = new Map(), out = [];
+    for (var i = 0; i < sessions.length; i++) {
+      var s = sessions[i], key = s.game + "\u0000" + s.start.utcMs, at = seen.get(key);
+      if (at === undefined) { seen.set(key, out.length); out.push(s); continue; }
+      var cur = out[at];
+      if ((cur.open && !s.open) || (cur.open === s.open && s.end.utcMs > cur.end.utcMs)) out[at] = s;
+    }
+    return out;
   }
 
   // ---- Splitting by local day -----------------------------------------
@@ -365,9 +369,9 @@ GT.agg = (function () {
   // (APPROXIMATION: the tracker doesn't record where pauses happened). Integer
   // seconds are kept by cumulative rounding, so pieces always sum to active_s.
   // Piece: {game, source, day, startMs, endMs, offsetMin, endOffsetMin, active_s, open, sid, sessionActive_s}
-  // offsetMin is the offset in which startMs is read (the start offset, except for the
-  // last piece of a multi-piece session, which uses the end offset); endOffsetMin is the
-  // offset in which endMs is read. `open` marks the piece that is still in progress.
+  // offsetMin is the offset in which startMs is read: always the session's start offset
+  // (continuation pieces start at a start-offset midnight, so they read 00:00);
+  // endOffsetMin is the offset in which endMs is read (the end offset for the last piece). `open` marks the piece that is still in progress.
   // `sid` is the session's index within THIS call's input; do not mix pieces
   // from separate splitByDay calls in one byGame/summary call.
   function splitByDay(sessions) {
@@ -388,7 +392,7 @@ GT.agg = (function () {
         pieces.push({ game: s.game, source: s.source,
                       day: last ? endDay : dayKeyFromLocalMs(localMs(cuts[c], off)),
                       startMs: cuts[c], endMs: cuts[c + 1],
-                      offsetMin: last && c > 0 ? eoff : off, endOffsetMin: last ? eoff : off,
+                      offsetMin: off, endOffsetMin: last ? eoff : off,
                       active_s: cum - prevCum, open: last && s.open, sid: i, sessionActive_s: s.active_s });
         prevCum = cum;
       }
@@ -505,12 +509,27 @@ GT.agg = (function () {
   }
 
   // ---- Presentation helpers ------------------------------------------
-  function gameColorIndex(name) { // djb2-style hash, stable across sessions and machines
-    var h = 5381;
-    for (var i = 0; i < name.length; i++) h = ((h * 33) ^ name.charCodeAt(i)) >>> 0;
-    return h % PALETTE.length;
+  // Game -> rank (0 = most played) by all-time active seconds over `pieces`, ties by name.
+  // Rank r < COLOR_SLOTS gets categorical slot r; anything else is "other". Computed once
+  // from ALL data (never from a filtered subset) so colours stay stable across views.
+  function rankGames(pieces) {
+    var tot = new Map();
+    for (var i = 0; i < pieces.length; i++) tot.set(pieces[i].game, (tot.get(pieces[i].game) || 0) + pieces[i].active_s);
+    var names = Array.from(tot.keys()).sort(function (a, b) { return tot.get(b) - tot.get(a) || (a < b ? -1 : a > b ? 1 : 0); });
+    var rank = new Map();
+    names.forEach(function (n, r) { rank.set(n, r); });
+    return rank;
   }
-  function gameColor(name) { return PALETTE[gameColorIndex(name)]; }
+  function colorSlot(rank, name) { var r = rank.get(name); return r !== undefined && r < COLOR_SLOTS ? r : -1; } // -1 = other
+
+  // Horizontal extent of a piece within its own day as fractions [0..1] of the 24 h axis,
+  // in wall-clock time (start in offsetMin, end in endOffsetMin), clamped to the day.
+  function pieceSpan(p) {
+    var d0 = keyToLocalMs(p.day);
+    var x0 = (localMs(p.startMs, p.offsetMin) - d0) / DAY_MS, x1 = (localMs(p.endMs, p.endOffsetMin) - d0) / DAY_MS;
+    x0 = Math.min(1, Math.max(0, x0)); x1 = Math.min(1, Math.max(x0, x1));
+    return { x0: x0, x1: x1 };
+  }
 
   function formatDuration(s) {
     s = Math.max(0, Math.floor(s));
@@ -521,8 +540,8 @@ GT.agg = (function () {
 
   return { parseTime: parseTime, localDay: localDay, localHour: localHour, localMinute: localMinute,
            validateSession: validateSession, parseDocument: parseDocument, splitByDay: splitByDay,
-           byDay: byDay, byGame: byGame, summary: summary, ranges: ranges, gameColor: gameColor,
-           gameColorIndex: gameColorIndex, palette: PALETTE, formatDuration: formatDuration,
+           byDay: byDay, byGame: byGame, summary: summary, ranges: ranges, rankGames: rankGames,
+           colorSlot: colorSlot, colorSlots: COLOR_SLOTS, dedupe: dedupe, pieceSpan: pieceSpan, formatDuration: formatDuration,
            addDays: addDays, addMonths: addMonths, addYears: addYears, weekdayIndex: weekdayIndex,
            monthGrid: monthGrid, yearGrid: yearGrid, bucket: bucket, clock: clock };
 })();
@@ -690,10 +709,45 @@ GT.selftest = function () {
     for (var i = 0; i < c.length; i++) { var r = A.formatDuration(c[i][0]); if (r !== c[i][1]) return c[i][0] + " -> " + r; }
     return true;
   });
-  test("gameColor: deterministic, in palette range", function () {
-    var a = A.gameColorIndex("Hades");
-    return (a === A.gameColorIndex("Hades") && a >= 0 && a < A.palette.length &&
-            A.gameColor("Hades") === A.palette[a] && /^#[0-9a-f]{6}$/.test(A.gameColor(""))) || "bad";
+  test("rankGames: by all-time active desc, ties by name; slots 0-7 then other", function () {
+    var mk = function (g, a) { return { game: g, active_s: a }; };
+    var ps = [mk("B", 100), mk("A", 100), mk("C", 500)];
+    for (var i = 0; i < 8; i++) ps.push(mk("G" + i, 1));
+    var r = A.rankGames(ps);
+    return (r.get("C") === 0 && r.get("A") === 1 && r.get("B") === 2 && A.colorSlot(r, "C") === 0 &&
+            A.colorSlot(r, "G4") === 7 && A.colorSlot(r, "G5") === -1 && A.colorSlot(r, "nope") === -1 && A.colorSlots === 8) || JSON.stringify(Array.from(r));
+  });
+  test("dedupe: same game+start keeps the closed record, else the later end", function () {
+    var v = function (o) { return A.validateSession({ game: "G", source: "s", start: "2026-08-10T20:00:00+02:00", end: o.end, active_s: o.a, open: o.open }); };
+    var open = v({ end: "2026-08-10T21:00:00+02:00", a: 3000, open: true }), closed = v({ end: "2026-08-10T21:10:00+02:00", a: 3500 });
+    var other = A.validateSession({ game: "H", source: "s", start: "2026-08-10T20:00:00+02:00", end: "2026-08-10T21:00:00+02:00", active_s: 10 });
+    var d1 = A.dedupe([open, closed, other]), d2 = A.dedupe([closed, open]);
+    var later = A.dedupe([v({ end: "2026-08-10T21:00:00+02:00", a: 3000 }), v({ end: "2026-08-10T21:30:00+02:00", a: 3000 })]);
+    return (d1.length === 2 && !d1[0].open && d1[0].active_s === 3500 && d2.length === 1 && !d2[0].open &&
+            later.length === 1 && later[0].active_s === 3000 && later[0].end.utcMs === closed.end.utcMs + 1200000) || JSON.stringify([d1.length, d2.length, later.length]);
+  });
+  test("parseDocument dedupes open + closed copies of one session", function () {
+    var base = { game: "G", source: "s", start: "2026-08-10T20:00:00+02:00" };
+    var d = A.parseDocument({ version: 1, sessions: [
+      { game: "G", source: "s", start: base.start, end: "2026-08-10T21:00:00+02:00", active_s: 3000, open: true },
+      { game: "G", source: "s", start: base.start, end: "2026-08-10T21:05:00+02:00", active_s: 3100 }] });
+    return (d.sessions.length === 1 && d.sessions[0].open === false && d.skipped === 0) || d.sessions.length;
+  });
+  test("pieceSpan: fall-back 01:00+02 -> 05:00+01 is drawn 4 h wide (01:00-05:00 wall clock)", function () {
+    var p = A.splitByDay([S("G", "2026-10-25T01:00:00+02:00", "2026-10-25T05:00:00+01:00", 18000)]);
+    var sp = A.pieceSpan(p[0]);
+    return (Math.abs(sp.x0 - 1 / 24) < 1e-9 && Math.abs(sp.x1 - 5 / 24) < 1e-9 && Math.abs((sp.x1 - sp.x0) * 24 - 4) < 1e-9) || JSON.stringify(sp);
+  });
+  test("pieceSpan: fall-back 10-24 23:00+02 -> 10-25 08:00+01, second piece reads 00:00-08:00", function () {
+    var p = A.splitByDay([S("G", "2026-10-24T23:00:00+02:00", "2026-10-25T08:00:00+01:00", 36000)]);
+    var a = A.pieceSpan(p[0]), b = A.pieceSpan(p[1]);
+    return (p.length === 2 && p[1].day === "2026-10-25" && A.clock(p[1].startMs, p[1].offsetMin) === "00:00" &&
+            A.clock(p[1].endMs, p[1].endOffsetMin) === "08:00" && b.x0 === 0 && Math.abs(b.x1 - 8 / 24) < 1e-9 &&
+            Math.abs(a.x0 - 23 / 24) < 1e-9 && a.x1 === 1) || JSON.stringify([p, a, b]);
+  });
+  test("pieceSpan: clamps to the day", function () {
+    var sp = A.pieceSpan({ day: "2026-08-10", startMs: Date.UTC(2026, 7, 9, 20), endMs: Date.UTC(2026, 7, 11, 5), offsetMin: 0, endOffsetMin: 0 });
+    return (sp.x0 === 0 && sp.x1 === 1) || JSON.stringify(sp);
   });
   test("split: spring-forward span 03-28 22:00+01 -> 03-29 23:30+02 credits 7200 s to 03-28", function () {
     var p = A.splitByDay([S("G", "2026-03-28T22:00:00+01:00", "2026-03-29T23:30:00+02:00", 88200)]);
@@ -703,9 +757,9 @@ GT.selftest = function () {
     var p = A.splitByDay([S("G", "2026-10-25T01:00:00+02:00", "2026-10-25T05:00:00+01:00", 18000)]);
     return (p.length === 1 && p[0].day === "2026-10-25" && p[0].offsetMin === 120 && p[0].endOffsetMin === 60) || JSON.stringify(p);
   });
-  test("split: multi-piece offsets (first = start offset, last = end offset)", function () {
+  test("split: multi-piece offsets (every piece starts in the start offset, last ends in the end offset)", function () {
     var p = A.splitByDay([S("G", "2026-10-24T22:00:00+02:00", "2026-10-25T23:30:00+01:00", 95400)]);
-    return (p.length === 2 && p[0].offsetMin === 120 && p[0].endOffsetMin === 120 && p[1].offsetMin === 60 && p[1].endOffsetMin === 60) || JSON.stringify(p);
+    return (p.length === 2 && p[0].offsetMin === 120 && p[0].endOffsetMin === 120 && p[1].offsetMin === 120 && p[1].endOffsetMin === 60) || JSON.stringify(p);
   });
   test("split: open flag only on the last piece, and counted in totals", function () {
     var s = A.validateSession({ game: "G", source: "steam", start: "2026-08-10T23:00:00+02:00", end: "2026-08-11T01:00:00+02:00", active_s: 6000, open: true });
@@ -755,6 +809,31 @@ GT.selftest = function () {
     A.byDay(p); A.byGame(p, null); A.summary(p, null);
     var ms = Date.now() - t0;
     return (d.sessions.length === 10000 && ms < 200) || ms + " ms";
+  });
+  test("contrast: every ink/fill token pair >= 4.5:1 in light and dark", function () {
+    var root = document.documentElement, probe = document.createElement("div"), prev = root.getAttribute("data-theme"), bad = [];
+    document.body.appendChild(probe);
+    function rgb(token) {
+      probe.style.color = "var(" + token + ")";
+      var m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(getComputedStyle(probe).color);
+      return m ? [+m[1], +m[2], +m[3]] : null;
+    }
+    function lum(c) { var f = c.map(function (v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2]; }
+    function ratio(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+    var pairs = [["--other", "--cfo"], ["--accent-fill", "--onaccent"], ["--panel", "--text"], ["--panel", "--text2"], ["--panel", "--bad"], ["--panel", "--good"]];
+    for (var i = 0; i < 8; i++) { pairs.push(["--c" + i, "--cf" + i]); pairs.push(["--s" + i, "--sf" + i]); }
+    ["light", "dark"].forEach(function (th) {
+      root.setAttribute("data-theme", th);
+      pairs.forEach(function (pr) {
+        var a = rgb(pr[0]), b = rgb(pr[1]);
+        if (!a || !b) { bad.push(th + " " + pr + " unresolved"); return; }
+        var r = ratio(a, b);
+        if (r < 4.5) bad.push(th + " " + pr[0] + "/" + pr[1] + " " + r.toFixed(2));
+      });
+    });
+    if (prev === null) root.removeAttribute("data-theme"); else root.setAttribute("data-theme", prev);
+    document.body.removeChild(probe);
+    return bad.length === 0 || bad.join("; ");
   });
   return results;
 };
@@ -863,11 +942,13 @@ GT.selftest = function () {
   }
 
   // ---- State ------------------------------------------------------------
-  // pieces: all day pieces; fp: pieces after the game filter; dayMap/maxDay: byDay(fp) and its max day total.
+  // pieces: all day pieces; rank: game -> all-time rank (colours); fp: pieces after the game filter;
+  // dayMap: byDay(fp); maxDay: busiest day of the displayed year (shading scale, set in render()).
   var state = null;
 
-  function colorVar(name) { return "var(--c" + A.gameColorIndex(name) + ")"; }
-  function inkVar(name) { return "var(--cf" + A.gameColorIndex(name) + ")"; }
+  // Colours come from the all-time rank (state.rank): top 8 games get slots, the rest "other".
+  function colorVar(name) { var n = A.colorSlot(state.rank, name); return n < 0 ? "var(--other)" : "var(--c" + n + ")"; }
+  function inkVar(name) { var n = A.colorSlot(state.rank, name); return n < 0 ? "var(--cfo)" : "var(--cf" + n + ")"; }
   function swatch(name) { var s = el("span", { className: "sw" }); s.style.background = colorVar(name); return s; }
 
   function fmtDay(k) { return DOW[A.weekdayIndex(k)] + ", " + MON3[+k.slice(5, 7) - 1] + " " + (+k.slice(8)) + ", " + k.slice(0, 4); }
@@ -896,10 +977,11 @@ GT.selftest = function () {
       if (p.open) open.push(p);
     });
     state = { pieces: pieces, byDayPieces: byDayPieces, open: open, refDay: refDay, anchor: refDay, range: "month",
-              game: null, selDay: null, showAll: false, fp: pieces, dayMap: null, maxDay: 0 };
+              game: null, selDay: null, opener: null, showAll: false, fp: pieces, dayMap: null, maxDay: 0,
+              rank: A.rankGames(pieces), genClock: data.generated ? A.clock(data.generated.utcMs, data.generated.offsetMin) : "" };
     // Optional deep links: ?day=YYYY-MM-DD opens that day's timeline, ?range=week|month|year|all.
     var q = new URLSearchParams(location.search), qd = q.get("day"), qr = q.get("range");
-    if (qd && /^\d{4}-\d\d-\d\d$/.test(qd)) { state.selDay = qd; state.anchor = qd; }
+    if (qd && /^\d{4}-\d\d-\d\d$/.test(qd) && A.addDays(qd, 0) === qd) { state.selDay = qd; state.anchor = qd; }
     if (qr && ["week", "month", "year", "all"].indexOf(qr) >= 0) state.range = qr;
     showError("");
     $("app").style.display = "";
@@ -917,9 +999,6 @@ GT.selftest = function () {
     var g = state.game;
     state.fp = g ? state.pieces.filter(function (p) { return p.game === g; }) : state.pieces;
     state.dayMap = A.byDay(state.fp);
-    var mx = 0;
-    state.dayMap.forEach(function (e) { if (e.total_s > mx) mx = e.total_s; });
-    state.maxDay = mx;
   }
 
   // Re-render everything, keeping keyboard focus on the same logical control.
@@ -937,6 +1016,10 @@ GT.selftest = function () {
 
   function render() {
     var rng = A.ranges(state.anchor)[state.range];
+    // One shading scale for calendar and heatmap: the busiest day of the displayed year.
+    var yp = state.anchor.slice(0, 4) + "-", mx = 0;
+    state.dayMap.forEach(function (e, k) { if (e.total_s > mx && k.slice(0, 5) === yp) mx = e.total_s; });
+    state.maxDay = mx;
     renderControls(rng);
     renderSummary(A.summary(state.fp, rng));
     renderMonth();
@@ -955,7 +1038,7 @@ GT.selftest = function () {
     $("filter").hidden = !state.game;
     $("filterName").textContent = state.game ? "Game: " + state.game : "";
     var live = $("live");
-    if (state.open.length) { live.hidden = false; live.textContent = "Playing now: " + state.open[state.open.length - 1].game; }
+    if (state.open.length) { live.hidden = false; live.textContent = "Playing now: " + state.open[state.open.length - 1].game + (state.genClock ? " · as of " + state.genClock : ""); }
     else live.hidden = true;
   }
 
@@ -1055,14 +1138,13 @@ GT.selftest = function () {
     if (!k) return;
     var body = $("dayBody"); body.textContent = "";
     $("dayTitle").textContent = fmtDay(k);
-    var ps = (state.byDayPieces.get(k) || []).filter(function (p) { return !state.game || p.game === state.game; })
+    var ps = (state.byDayPieces.get(k) || []).filter(function (p) { return (p.active_s > 0 || p.open) && (!state.game || p.game === state.game); })
       .sort(function (a, b) { return a.startMs - b.startMs; });
     var total = 0; ps.forEach(function (p) { total += p.active_s; });
     $("dayMeta").textContent = ps.length ? A.formatDuration(total) + " active · times in game PC time (" + fmtOffset(ps[0].offsetMin) + ")" +
       (state.game ? " · " + state.game + " only" : "") : "";
     if (!ps.length) { body.appendChild(el("div", { className: "empty-note", textContent: "No sessions on this day" + (state.game ? " for " + state.game : "") + "." })); return; }
 
-    var dayStart = Date.parse(k + "T00:00:00Z");
     var axis = el("div", { className: "axis" });
     axis.setAttribute("role", "group"); axis.setAttribute("aria-label", "24-hour timeline for " + fmtDay(k));
     for (var h = 0; h <= 24; h += 3) {
@@ -1072,15 +1154,14 @@ GT.selftest = function () {
       axis.appendChild(tk);
     }
     ps.forEach(function (p) {
-      var x = (p.startMs + p.offsetMin * 60000 - dayStart) / DAY_MS, w = (p.endMs - p.startMs) / DAY_MS;
-      if (x < 0) { w += x; x = 0; }
-      if (x + w > 1) w = 1 - x;
+      var sp = A.pieceSpan(p); // wall-clock extent within the day (own offsets), clamped to the axis
       var times = A.clock(p.startMs, p.offsetMin) + "–" + A.clock(p.endMs, p.endOffsetMin);
       var desc = p.game + ", " + times + ", " + A.formatDuration(p.active_s) + " active" + (p.open ? ", playing now" : "");
-      var b = el("button", { type: "button", className: "blk" + (p.open ? " open" : ""), textContent: p.game });
-      b.style.left = (Math.max(0, x) * 100) + "%"; b.style.width = (Math.max(w, 0) * 100) + "%";
+      var b = el("div", { className: "blk" + (p.open ? " open" : ""), textContent: p.game, tabIndex: 0 });
+      b.setAttribute("role", "img");
+      b.style.left = "min(" + (sp.x0 * 100) + "%, calc(100% - 4px))"; b.style.width = ((sp.x1 - sp.x0) * 100) + "%";
       b.style.background = colorVar(p.game); b.style.color = inkVar(p.game);
-      b.setAttribute("data-game", p.game); b.setAttribute("aria-label", desc);
+      b.setAttribute("aria-label", desc);
       b.setAttribute("data-tip", p.game + "\n" + times + " local\n" + A.formatDuration(p.active_s) + " active" + (p.open ? "\nPlaying now" : ""));
       axis.appendChild(b);
     });
@@ -1100,12 +1181,25 @@ GT.selftest = function () {
   }
 
   // ---- Year heatmap -------------------------------------------------------
+  // Text alternative for the whole heatmap (cells are aria-hidden; the calendar and tables are the keyboard path).
+  function heatSummary(year) {
+    var yp = year + "-", total = 0, days = 0, best = "", bestS = 0;
+    state.dayMap.forEach(function (e, k) {
+      if (k.slice(0, 5) !== yp || e.total_s <= 0) return;
+      total += e.total_s; days++;
+      if (e.total_s > bestS) { bestS = e.total_s; best = k; }
+    });
+    return "Year " + year + " heatmap, one cell per day, weeks as columns. " + (days
+      ? A.formatDuration(total) + " played on " + plural(days, "day") + "; busiest day " + fmtDay(best) + ", " + A.formatDuration(bestS) + "."
+      : "No play recorded.");
+  }
+
   function renderHeatmap() {
     var host = $("heat"); host.textContent = "";
     var year = +state.anchor.slice(0, 4), weeks = A.yearGrid(year);
     $("heatTitle").textContent = "Year " + year;
     var P = 14, C = 11, LX = 28, TY = 16;
-    var root = svg("svg", { viewBox: "0 0 " + (LX + weeks.length * P) + " " + (TY + 7 * P), role: "group", "aria-label": "Year heatmap " + year });
+    var root = svg("svg", { viewBox: "0 0 " + (LX + weeks.length * P) + " " + (TY + 7 * P), role: "img", "aria-label": heatSummary(year) });
     ["Mon", "Wed", "Fri"].forEach(function (d, i) { root.appendChild(svgText(0, TY + i * 2 * P + 9, d)); });
     var lastMonth = -1;
     weeks.forEach(function (w, c) {
@@ -1119,16 +1213,22 @@ GT.selftest = function () {
         var e = state.dayMap.get(k), total = e ? e.total_s : 0, live = isLive(k);
         var rect = svg("rect", { x: LX + c * P, y: TY + r * P, width: C, height: C, rx: 2,
           "class": "hc b" + A.bucket(total, state.maxDay, 7) + (k === state.refDay ? " today" : "") + (k === state.selDay ? " sel" : ""),
-          "data-day": k, role: "button", "aria-label": dayLabel(k, e, live), "data-tip": dayTip(k, e, live) });
+          "data-day": k, "aria-hidden": "true", "data-tip": dayTip(k, e, live) });
         root.appendChild(rect);
       });
     });
     host.appendChild(root);
+    // On narrow screens the heatmap scrolls: bring the reference ("today") week into view.
+    var sc = host.parentNode;
+    if (sc.scrollWidth > sc.clientWidth && year === +state.refDay.slice(0, 4)) {
+      var col = 0; weeks.forEach(function (w, c) { if (w.indexOf(state.refDay) >= 0) col = c; });
+      sc.scrollLeft = Math.max(0, (LX + col * P) * (sc.scrollWidth / (LX + weeks.length * P)) - sc.clientWidth / 2);
+    } else sc.scrollLeft = 0;
 
     var lg = $("heatLegend"); lg.textContent = "";
     lg.appendChild(document.createTextNode("Less"));
     for (var b = 0; b <= 7; b++) lg.appendChild(el("i", { className: "b" + b }));
-    lg.appendChild(document.createTextNode("More" + (state.maxDay ? " (busiest day: " + A.formatDuration(state.maxDay) + ")" : "")));
+    lg.appendChild(document.createTextNode("More" + (state.maxDay ? " (busiest day this year: " + A.formatDuration(state.maxDay) + ")" : "")));
   }
 
   // ---- Per-game totals ----------------------------------------------------
@@ -1145,7 +1245,7 @@ GT.selftest = function () {
       var fill = el("i"); fill.style.width = (g.total_s / max * 100) + "%"; fill.style.background = colorVar(g.game);
       var meta = plural(g.sessions, "session") + " · avg " + A.formatDuration(g.avg_session_s) + " · " + share + "% of total";
       var row = el("button", { type: "button", className: "grow" + (state.game && state.game !== g.game ? " dim" : "") }, [
-        el("span", { className: "gname" }, [swatch(g.game), el("span", { className: "t", textContent: g.game + " (" + g.source + ")" })]),
+        el("span", { className: "gname" }, [swatch(g.game), el("span", { className: "t", textContent: g.game + (g.source ? " (" + g.source + ")" : "") })]),
         el("span", { className: "gbar" }, [fill]),
         el("span", { className: "gval", textContent: A.formatDuration(g.total_s) }),
         el("span", { className: "gmeta", textContent: meta })]);
@@ -1182,10 +1282,20 @@ GT.selftest = function () {
 
   // ---- Interaction ----------------------------------------------------------
   function toggleDay(k) {
-    var open = state.selDay !== k;
-    state.selDay = open ? k : null;
+    if (state.selDay === k) return closeDay();
+    state.selDay = k;
     rerender();
-    if (open) $("dayPanel").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    $("dayPanel").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    $("dayTitle").focus({ preventScroll: true });
+  }
+  // Closing returns focus to the day cell that opened the panel (fallback: the Today button).
+  function closeDay() {
+    var k = state.selDay;
+    state.selDay = null;
+    rerender();
+    var cells = $("month").querySelectorAll("[data-day]"), target = null;
+    for (var i = 0; i < cells.length; i++) if (cells[i].getAttribute("data-day") === k) { target = cells[i]; break; }
+    (target || $("today")).focus({ preventScroll: false });
   }
   function toggleGame(g) {
     state.game = state.game === g ? null : g;
@@ -1208,9 +1318,9 @@ GT.selftest = function () {
   $("next").onclick = function () { shiftAnchor(1); };
   $("today").onclick = function () { state.anchor = state.refDay; rerender(); };
   $("clearFilter").onclick = function () { state.game = null; applyFilter(); rerender(); };
-  $("dayClose").onclick = function () { state.selDay = null; rerender(); };
+  $("dayClose").onclick = closeDay;
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && state && state.selDay) { state.selDay = null; rerender(); }
+    if (e.key === "Escape" && state && state.selDay) closeDay();
   });
 
   // ---- Self-test page ---------------------------------------------------
