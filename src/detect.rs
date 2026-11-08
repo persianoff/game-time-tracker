@@ -289,9 +289,28 @@ pub fn ea_uninstall_game(get: impl Fn(&str) -> Option<String>) -> Option<Game> {
     let name = get("DisplayName");
     if let Some(n) = name.as_deref() {
         let l = n.trim().to_lowercase();
-        if l == "origin" || l.starts_with("ea app") || l.starts_with("ea desktop") {
+        const DENY: &[&str] = &[
+            "anticheat",
+            "anti-cheat",
+            "anti cheat",
+            "redistributable",
+            "background service",
+            "helper",
+        ];
+        if l == "origin"
+            || l.starts_with("ea app")
+            || l.starts_with("ea desktop")
+            || DENY.iter().any(|d| l.contains(d))
+        {
             return None;
         }
+    }
+    let norm = lower_key(Path::new(&dir));
+    let last = norm.rsplit('\\').next().unwrap_or("");
+    if matches!(last, "ea desktop" | "origin" | "ac")
+        || norm.contains("\\electronic arts\\ea desktop")
+    {
+        return None;
     }
     make_game(Source::Ea, name.as_deref(), Path::new(&dir))
 }
@@ -392,23 +411,38 @@ const GAMING_ROOT_MAX_FOLDERS: usize = 64;
 /// Maximum `.GamingRoot` file size read (the real file is under 100 bytes).
 const GAMING_ROOT_MAX_BYTES: u64 = 16 * 1024;
 
-/// Parse a `.GamingRoot` file: magic `RGBX`, LE u32 version, LE u32 count, then
-/// `count` NUL-terminated UTF-16LE relative paths. Returns `None` for a bad
-/// magic or an implausible count. A truncated tail yields the entries that
-/// were complete. Entries that are absolute, contain `..` or a drive prefix,
-/// or are empty are dropped.
+/// Parse a `.GamingRoot` file. Two header layouts are accepted, since the
+/// real one is not verified (see #14):
+/// (a) `RGBX`, LE u32 version, LE u32 count, then `count` NUL-terminated
+///     UTF-16LE relative paths at offset 12 (used when count is 1..=64 and at
+///     least one valid entry parses);
+/// (b) `RGBX`, LE u32, then NUL-terminated UTF-16LE paths from offset 8 to EOF
+///     (at most 64 entries).
+/// Returns `None` for a bad magic. A truncated tail yields the complete
+/// entries. Entries that are absolute, contain `..`, a drive prefix or control
+/// characters, or are empty are dropped.
 pub fn parse_gaming_root(data: &[u8]) -> Option<Vec<String>> {
-    if data.len() < 12 || &data[..4] != b"RGBX" {
+    if data.len() < 8 || &data[..4] != b"RGBX" {
         return None;
     }
-    let count = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
-    if count > GAMING_ROOT_MAX_FOLDERS {
-        return None;
+    if data.len() >= 12 {
+        let count = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+        if (1..=GAMING_ROOT_MAX_FOLDERS).contains(&count) {
+            let v = parse_utf16_paths(&data[12..], count);
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
     }
+    Some(parse_utf16_paths(&data[8..], GAMING_ROOT_MAX_FOLDERS))
+}
+
+/// Up to `max` NUL-terminated UTF-16LE strings; an unterminated tail is dropped.
+fn parse_utf16_paths(data: &[u8], max: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut units: Vec<u16> = Vec::new();
-    let mut pos = 12;
-    for _ in 0..count {
+    let mut pos = 0;
+    for _ in 0..max {
         units.clear();
         let mut terminated = false;
         while pos + 2 <= data.len() {
@@ -421,24 +455,24 @@ pub fn parse_gaming_root(data: &[u8]) -> Option<Vec<String>> {
             units.push(u);
         }
         if !terminated {
-            break; // truncated: drop the partial entry
+            break;
         }
         if let Some(rel) = safe_relative(&String::from_utf16_lossy(&units)) {
             out.push(rel);
         }
     }
-    Some(out)
+    out
 }
 
 /// A relative folder below a drive root: no drive, no leading separator, no
 /// `..`/`.` components. Returned with `\` separators.
 fn safe_relative(s: &str) -> Option<String> {
     let s = s.trim().replace('/', "\\");
-    if s.contains(':') || s.starts_with('\\') {
+    if s.contains(':') || s.starts_with('\\') || s.chars().any(char::is_control) {
         return None;
     }
     let parts: Vec<&str> = s.split('\\').filter(|p| !p.is_empty()).collect();
-    if parts.is_empty() || parts.iter().any(|p| *p == ".." || *p == ".") {
+    if parts.is_empty() || parts.iter().any(|p| p.ends_with(['.', ' '])) {
         return None;
     }
     Some(parts.join("\\"))
@@ -465,36 +499,89 @@ fn read_gaming_root(drive: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Drives that had a `.GamingRoot` or `XboxGames` on the first scan. Later
-/// rescans only touch these, so idle HDDs without Xbox content are not
-/// spun up every 30 minutes. A drive added later is picked up on restart.
-static XBOX_DRIVES: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+/// Re-probe every fixed drive at least this often (seconds), so Xbox content
+/// that appears later (first Game Pass install, a late-mounted drive) is found.
+const XBOX_FULL_SWEEP_S: u64 = 6 * 3600;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct XboxCache {
+    /// Drives that had a `.GamingRoot` or `XboxGames` at the last sweep.
+    drives: Vec<String>,
+    last_sweep: u64,
+}
+
+static XBOX_CACHE: std::sync::Mutex<Option<XboxCache>> = std::sync::Mutex::new(None);
+
+/// Decide which drives to probe. Normally only the known Xbox drives, so idle
+/// HDDs are not spun up every 30 minutes; on the first scan and when the last
+/// full sweep is older than `XBOX_FULL_SWEEP_S`, all fixed drives.
+/// Returns `(drives, full_sweep)`.
+fn xbox_plan(cache: Option<&XboxCache>, now: u64, fixed: &[String]) -> (Vec<String>, bool) {
+    match cache {
+        Some(c) if now.saturating_sub(c.last_sweep) < XBOX_FULL_SWEEP_S => {
+            (c.drives.clone(), false)
+        }
+        _ => (fixed.to_vec(), true),
+    }
+}
+
+/// New cache after a scan. A full sweep replaces the set with what it found
+/// (plus nothing stale); a fast scan keeps the cache unchanged.
+fn xbox_update(cache: Option<XboxCache>, found: Vec<String>, full: bool, now: u64) -> XboxCache {
+    match cache {
+        Some(c) if !full => c,
+        Some(c) => {
+            let mut drives = c.drives;
+            drives.retain(|d| found.contains(d));
+            for d in found {
+                if !drives.contains(&d) {
+                    drives.push(d);
+                }
+            }
+            XboxCache {
+                drives,
+                last_sweep: now,
+            }
+        }
+        None => XboxCache {
+            drives: found,
+            last_sweep: now,
+        },
+    }
+}
 
 fn scan_xbox() -> Vec<Game> {
-    let known = XBOX_DRIVES.lock().ok().and_then(|g| g.clone());
-    let first = known.is_none();
-    let drives = known.unwrap_or_else(fixed_drives);
-    let mut with_xbox = Vec::new();
+    static LOGGED_BAD_ROOT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let now = win32::now_utc_secs();
+    let cache = XBOX_CACHE.lock().ok().and_then(|g| g.clone());
+    let (drives, full) = xbox_plan(cache.as_ref(), now, &fixed_drives());
+    let mut found_drives = Vec::new();
     let mut out = Vec::new();
     for d in drives {
         let gr = read_gaming_root(&d);
         let mut found = gr.is_some();
+        if let Some(bytes) = gr.as_deref() {
+            let empty = parse_gaming_root(bytes).is_some_and(|v| v.is_empty());
+            if empty && !LOGGED_BAD_ROOT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let hex: String = bytes.iter().take(32).map(|b| format!("{b:02x}")).collect();
+                crate::log::log_line(&format!("{d}.GamingRoot: no entries parsed: {hex}"));
+            }
+        }
         for f in xbox_folders(gr.as_deref()) {
             let root = Path::new(&d).join(&f);
-            if first && !root.is_dir() {
+            if full && !root.is_dir() {
                 continue;
             }
             found = true;
             out.extend(xbox_games_in(&root));
         }
         if found {
-            with_xbox.push(d);
+            found_drives.push(d);
         }
     }
-    if first {
-        if let Ok(mut g) = XBOX_DRIVES.lock() {
-            *g = Some(with_xbox);
-        }
+    if let Ok(mut g) = XBOX_CACHE.lock() {
+        *g = Some(xbox_update(cache, found_drives, full, now));
     }
     out
 }
@@ -515,7 +602,11 @@ fn is_separator_only(key: &str, field: &str) -> bool {
     let k = key.trim();
     let bad = !k.is_empty() && k.chars().all(|c| c == '\\' || c == '/');
     if bad {
-        crate::log::log_line(&format!("config: ignoring {field} entry {key:?}"));
+        // Rescans repeat this every 30 minutes; warn once per process.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            crate::log::log_line(&format!("config: ignoring {field} entry {key:?}"));
+        }
     }
     bad
 }
@@ -1019,10 +1110,72 @@ mod tests {
         assert!(parse_gaming_root(&gaming_root(0, 0, &[]))
             .unwrap()
             .is_empty());
-        assert!(parse_gaming_root(&gaming_root(0, 1_000_000, &["A"])).is_none());
+        // implausible count: falls to the layout-(b) reading, never panics
+        let _ = parse_gaming_root(&gaming_root(0, 1_000_000, &["A"]));
         // unsafe entries dropped, other version tolerated
         let d = gaming_root(7, 4, &["..\\x", "C:\\x", "\\x", "Ok/Sub"]);
         assert_eq!(parse_gaming_root(&d).unwrap(), vec!["Ok\\Sub"]);
+    }
+
+    #[test]
+    fn gaming_root_layout_b() {
+        // RGBX + u32, then paths from offset 8
+        let mut v = b"RGBX".to_vec();
+        v.extend(1u32.to_le_bytes());
+        for p in ["XboxGames", "Games\\Xbox"] {
+            for u in p.encode_utf16().chain([0]) {
+                v.extend(u.to_le_bytes());
+            }
+        }
+        assert_eq!(
+            parse_gaming_root(&v).unwrap(),
+            vec!["XboxGames", "Games\\Xbox"]
+        );
+        // header only: magic ok, nothing parsed
+        assert_eq!(parse_gaming_root(b"RGBX\0\0\0\0").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn safe_relative_rejects_dotty_components() {
+        for bad in [
+            "...", ".. ", "a\\b.", "a \\b", "..", ".", "a\\..\\b", "x\u{1}y",
+        ] {
+            assert!(safe_relative(bad).is_none(), "{bad:?}");
+        }
+        assert_eq!(safe_relative("A b\\C.d").as_deref(), Some("A b\\C.d"));
+    }
+
+    fn drives(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn xbox_plan_cases() {
+        let fixed = drives(&["C:\\", "D:\\", "E:\\"]);
+        // first scan: full sweep
+        assert_eq!(xbox_plan(None, 1000, &fixed), (fixed.clone(), true));
+        // fast rescan: known drives only
+        let c = XboxCache {
+            drives: drives(&["D:\\"]),
+            last_sweep: 1000,
+        };
+        assert_eq!(
+            xbox_plan(Some(&c), 1000 + 1800, &fixed),
+            (drives(&["D:\\"]), false)
+        );
+        // sweep due
+        let now = 1000 + XBOX_FULL_SWEEP_S;
+        assert_eq!(xbox_plan(Some(&c), now, &fixed), (fixed.clone(), true));
+        // merge new drives on a full sweep; vanished ones drop out
+        let c2 = xbox_update(Some(c.clone()), drives(&["D:\\", "E:\\"]), true, now);
+        assert_eq!(c2.drives, drives(&["D:\\", "E:\\"]));
+        assert_eq!(c2.last_sweep, now);
+        let c3 = xbox_update(Some(c2), drives(&["E:\\"]), true, now + 1);
+        assert_eq!(c3.drives, drives(&["E:\\"]));
+        // fast scan leaves the cache alone; first scan creates it
+        let c4 = xbox_update(Some(c3.clone()), drives(&["Z:\\"]), false, now + 2);
+        assert_eq!(c4, c3);
+        assert_eq!(xbox_update(None, drives(&["D:\\"]), true, 5).last_sweep, 5);
     }
 
     #[test]
@@ -1056,6 +1209,31 @@ mod tests {
         )))
         .is_none());
         assert!(ea_uninstall_game(map_get(&with("DisplayName", "EA app"))).is_none());
+        for n in [
+            "Foo Anticheat",
+            "Foo Anti-Cheat",
+            "EA Anti Cheat",
+            "VC Redistributable",
+            "EA Background Service",
+            "EA Helper",
+        ] {
+            assert!(
+                ea_uninstall_game(map_get(&with("DisplayName", n))).is_none(),
+                "{n}"
+            );
+        }
+        for loc in [
+            "D:\\Stuff\\EA Desktop",
+            "D:\\Stuff\\Origin",
+            "D:\\Foo\\AC",
+            "C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop",
+            "C:\\Program Files\\Electronic Arts\\EA Desktop\\x",
+        ] {
+            assert!(
+                ea_uninstall_game(map_get(&with("InstallLocation", loc))).is_none(),
+                "{loc}"
+            );
+        }
         let mut v = ok.clone();
         v.remove("InstallLocation");
         assert!(ea_uninstall_game(map_get(&v)).is_none());
