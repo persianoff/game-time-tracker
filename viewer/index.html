@@ -3,53 +3,194 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>GameTime</title>
 <style>
+/* ---- Theme tokens (dataviz reference palette; light default, dark by OS or ?theme=dark) ---- */
 :root {
-  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #dfe3ea;
-  --accent: #3b6fd4; --ok: #1a7f4b; --bad: #c62828;
+  color-scheme: light;
+  --bg: #f9f9f7; --panel: #fcfcfb; --text: #0b0b0b; --text2: #52514e; --muted: #898781;
+  --line: #e1e0d9; --axis: #c3c2b7; --accent: #2a78d6; --bad: #d03b3b; --good: #006300;
+  --shadow: rgba(11, 11, 11, 0.18);
+  /* categorical slots: blue, orange, aqua, yellow, magenta, green, violet, red */
+  --c0: #2a78d6; --c1: #eb6834; --c2: #1baf7a; --c3: #eda100; --c4: #e87ba4; --c5: #008300; --c6: #6250d6; --c7: #e34948;
+  --cf0: #fff; --cf1: #fff; --cf2: #fff; --cf3: #0b0b0b; --cf4: #fff; --cf5: #fff; --cf6: #fff; --cf7: #fff;
+  --other: #b5b4ab;
+  /* sequential (blue, one hue, light -> dark = more) and the ink on each step */
+  --s0: #f1f0ec; --s1: #cde2fb; --s2: #9ec5f4; --s3: #6da7ec; --s4: #3987e5; --s5: #256abf; --s6: #184f95; --s7: #0d366b;
+  --sf0: #52514e; --sf1: #0b0b0b; --sf2: #0b0b0b; --sf3: #0b0b0b; --sf4: #fff; --sf5: #fff; --sf6: #fff; --sf7: #fff;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d0d0d; --panel: #1a1a19; --text: #f0efec; --text2: #c3c2b7; --muted: #898781;
+  --line: #2c2c2a; --axis: #383835; --accent: #3987e5; --bad: #e66767; --good: #0ca30c;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --c0: #3987e5; --c1: #d95926; --c2: #199e70; --c3: #c98500; --c4: #d55181; --c5: #008300; --c6: #9085e9; --c7: #e66767;
+  --other: #5a5953;
+  --s0: #242422; --s1: #0d366b; --s2: #184f95; --s3: #1c5cab; --s4: #256abf; --s5: #3987e5; --s6: #6da7ec; --s7: #9ec5f4;
+  --sf0: #c3c2b7; --sf1: #fff; --sf2: #fff; --sf3: #fff; --sf4: #fff; --sf5: #0b0b0b; --sf6: #0b0b0b; --sf7: #0b0b0b;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #14171d; --panel: #1d222b; --text: #e6e9ef; --muted: #98a1b3; --line: #2d3441;
-          --accent: #7aa2f7; --ok: #5bd18b; --bad: #ff6b6b; }
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0d0d0d; --panel: #1a1a19; --text: #f0efec; --text2: #c3c2b7; --muted: #898781;
+    --line: #2c2c2a; --axis: #383835; --accent: #3987e5; --bad: #e66767; --good: #0ca30c;
+    --shadow: rgba(0, 0, 0, 0.6);
+    --c0: #3987e5; --c1: #d95926; --c2: #199e70; --c3: #c98500; --c4: #d55181; --c5: #008300; --c6: #9085e9; --c7: #e66767;
+    --other: #5a5953;
+    --s0: #242422; --s1: #0d366b; --s2: #184f95; --s3: #1c5cab; --s4: #256abf; --s5: #3987e5; --s6: #6da7ec; --s7: #9ec5f4;
+    --sf0: #c3c2b7; --sf1: #fff; --sf2: #fff; --sf3: #fff; --sf4: #fff; --sf5: #0b0b0b; --sf6: #0b0b0b; --sf7: #0b0b0b;
+  }
 }
+
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
        font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 960px; margin: 0 auto; padding: 16px; }
-header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+header.top { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; justify-content: space-between; }
 h1 { font-size: 20px; margin: 0; }
-h2 { font-size: 15px; margin: 24px 0 8px; color: var(--muted); font-weight: 600; }
-.meta { color: var(--muted); font-size: 13px; }
+h2 { font-size: 15px; margin: 0; font-weight: 600; }
+.meta { color: var(--text2); font-size: 13px; }
 button, input[type=text] { font: inherit; color: var(--text); background: var(--panel);
        border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
 button { cursor: pointer; }
-button:hover { border-color: var(--accent); }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.4; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 input[type=text] { width: min(420px, 100%); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
-.tile .label { color: var(--muted); font-size: 12px; }
+section.panel { margin-top: 14px; }
+.phead { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+
+/* controls: one row above the charts */
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 12px 0; min-height: 34px; }
+.seg { display: inline-flex; }
+.seg button { border-radius: 0; margin-left: -1px; }
+.seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.seg button:last-child { border-radius: 0 6px 6px 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; position: relative; }
+.nav { display: inline-flex; gap: 6px; align-items: center; }
+#period { min-width: 9.5em; text-align: center; font-weight: 600; }
+.chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--accent); border-radius: 14px; padding: 2px 4px 2px 10px; font-size: 13px; }
+.chip button { border: 0; background: none; padding: 0 6px; font-size: 16px; line-height: 1; }
+.live { font-size: 13px; font-weight: 600; }
+.live::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
+[hidden] { display: none !important; }
+
+/* tiles */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.tile { text-align: left; min-height: 66px; }
+.tile .label { color: var(--text2); font-size: 12px; }
 .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+button.tile:hover { border-color: var(--accent); }
+
+/* month calendar */
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.dow { font-size: 12px; color: var(--text2); text-align: center; padding-bottom: 2px; }
+.day { position: relative; display: flex; flex-direction: column; justify-content: space-between; align-items: stretch;
+       min-height: 68px; padding: 4px 5px 5px; text-align: left; border: 1px solid var(--line); border-radius: 6px;
+       background: var(--s0); color: var(--sf0); overflow: hidden; }
+.day.b1 { background: var(--s1); color: var(--sf1); } .day.b2 { background: var(--s2); color: var(--sf2); }
+.day.b3 { background: var(--s3); color: var(--sf3); } .day.b4 { background: var(--s4); color: var(--sf4); }
+.day.b5 { background: var(--s5); color: var(--sf5); } .day.b6 { background: var(--s6); color: var(--sf6); }
+.day.b7 { background: var(--s7); color: var(--sf7); }
+.day.out { opacity: 0.4; }
+.day.sel { box-shadow: inset 0 0 0 2px var(--text); }
+.dn { font-size: 12px; font-weight: 600; align-self: flex-start; min-width: 1.6em; text-align: center; border-radius: 10px; }
+.day.today .dn { background: var(--accent); color: #fff; padding: 0 4px; }
+.dt { font-size: 12px; font-weight: 600; margin: 2px 0; white-space: nowrap; }
+.bar { display: flex; gap: 2px; height: 7px; background: var(--panel); border-radius: 4px; padding: 1px; min-height: 7px; }
+.bar i { display: block; height: 100%; min-width: 2px; border-radius: 2px; }
+.bar.empty { visibility: hidden; }
+.ldot { position: absolute; top: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); box-shadow: 0 0 0 2px var(--panel); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.lchip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 12px; border-radius: 12px; }
+.lchip[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+td .sw { margin-right: 6px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+/* day timeline */
+.axis { position: relative; height: 50px; margin: 6px 0 22px; background: var(--s0); border-radius: 6px; border: 1px solid var(--line); }
+.tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.tick span { position: absolute; top: 100%; margin-top: 3px; transform: translateX(-50%); font-size: 11px; color: var(--text2); }
+.tick.first span { transform: none; } .tick.lastt span { transform: translateX(-100%); }
+.blk { position: absolute; top: 5px; bottom: 5px; min-width: 4px; padding: 0 5px; border: 0; border-radius: 4px;
+       box-shadow: 0 0 0 1px var(--panel); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 600; text-align: left; }
+.blk.open { background-image: repeating-linear-gradient(135deg, rgba(255,255,255,0.4) 0 4px, transparent 4px 9px);
+            outline: 2px dashed var(--text); outline-offset: -2px; }
+.blk:hover:not(:disabled), .blk:focus-visible { filter: brightness(1.12); border: 0; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 8px; border: 1px solid var(--bad); color: var(--bad); margin-left: 6px; }
+
+/* tables */
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 600; font-size: 12px; }
+th { color: var(--text2); font-weight: 600; font-size: 12px; }
 td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
-.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+
+/* year heatmap */
+.scroll { overflow-x: auto; }
+#heat svg { display: block; width: 100%; min-width: 640px; height: auto; }
+.hc { stroke: none; cursor: pointer; }
+.hc.b0 { fill: var(--s0); } .hc.b1 { fill: var(--s1); } .hc.b2 { fill: var(--s2); } .hc.b3 { fill: var(--s3); }
+.hc.b4 { fill: var(--s4); } .hc.b5 { fill: var(--s5); } .hc.b6 { fill: var(--s6); } .hc.b7 { fill: var(--s7); }
+.hc.today { stroke: var(--accent); stroke-width: 2; } .hc.sel { stroke: var(--text); stroke-width: 2; }
+.hc:hover { stroke: var(--text2); stroke-width: 1.5; }
+#heat text { fill: var(--text2); font-size: 10px; }
+.hleg { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--text2); }
+.hleg i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; }
+.hleg i.b0 { background: var(--s0); } .hleg i.b1 { background: var(--s1); } .hleg i.b2 { background: var(--s2); } .hleg i.b3 { background: var(--s3); }
+.hleg i.b4 { background: var(--s4); } .hleg i.b5 { background: var(--s5); } .hleg i.b6 { background: var(--s6); } .hleg i.b7 { background: var(--s7); }
+
+/* per-game totals */
+.grow { display: grid; grid-template-columns: minmax(0, 13em) minmax(0, 1fr) auto; grid-template-areas: "name bar val" "meta meta meta";
+        gap: 2px 12px; align-items: center; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 7px 4px; background: none; }
+.grow:hover:not(:disabled) { background: var(--s0); border-color: var(--line); }
+.grow[aria-pressed="true"] { background: var(--s0); box-shadow: inset 3px 0 0 var(--accent); }
+.grow.dim { opacity: 0.5; }
+.gname { grid-area: name; display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
+.gname span.t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gbar { grid-area: bar; height: 8px; }
+.gbar i { display: block; height: 100%; min-width: 2px; border-radius: 0 4px 4px 0; }
+.gval { grid-area: val; font-variant-numeric: tabular-nums; font-weight: 600; }
+.gmeta { grid-area: meta; font-size: 12px; color: var(--text2); padding-left: 16px; }
+.more { margin-top: 8px; }
+.empty-note { color: var(--text2); padding: 14px 4px; }
+
+/* tooltip */
+#tip { position: fixed; z-index: 10; pointer-events: none; max-width: 260px; padding: 6px 9px; font-size: 12px; line-height: 1.35;
+       background: var(--panel); color: var(--text); border: 1px solid var(--axis); border-radius: 6px; box-shadow: 0 4px 14px var(--shadow); white-space: pre-line; }
+#tip .tt { font-weight: 700; font-size: 13px; }
+
+/* loader / errors / selftest */
 #loader { margin: 12px 0; display: none; }
 #loader.open { display: block; }
-#drop { margin-top: 10px; border: 2px dashed var(--line); border-radius: 8px; padding: 22px; text-align: center; color: var(--muted); }
+#drop { margin-top: 10px; border: 2px dashed var(--line); border-radius: 8px; padding: 22px; text-align: center; color: var(--text2); }
 #drop.over { border-color: var(--accent); color: var(--text); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 #error { display: none; color: var(--bad); margin: 10px 0; white-space: pre-wrap; }
 #skipped { color: var(--bad); }
-.pass { color: var(--ok); } .fail { color: var(--bad); font-weight: 600; }
+.pass { color: var(--good); } .fail { color: var(--bad); font-weight: 600; }
 #selftest { display: none; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
 #selftest div { padding: 2px 0; }
+
+@media (max-width: 560px) {
+  main { padding: 10px; }
+  .cal { gap: 2px; }
+  .day { min-height: 54px; padding: 3px; }
+  .dt { font-size: 10px; } .dn { font-size: 11px; }
+  .grow { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name val" "bar bar" "meta meta"; }
+  .gmeta { padding-left: 0; }
+  #period { min-width: 0; }
+}
+@media (forced-colors: active) {
+  .day, .blk, .grow[aria-pressed="true"] { border: 1px solid CanvasText; }
+  .hc { stroke: CanvasText; stroke-width: 0.5; }
+}
 </style>
 </head>
 <body>
 <main>
-  <header>
+  <header class="top">
     <h1>GameTime</h1>
     <div class="meta"><span id="srcinfo">no data loaded</span><span id="skipped"></span>
       <button id="loadbtn" type="button">Load…</button></div>
@@ -70,13 +211,50 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
   <div id="error" role="alert"></div>
 
   <div id="app" style="display:none">
-    <h2 id="monthtitle"></h2>
-    <div class="tiles" id="tiles"></div>
-    <h2>Per game (this month)</h2>
-    <div class="panel"><table id="games"></table></div>
-    <h2>Days (this month)</h2>
-    <div class="panel"><table id="days"></table></div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="Range" id="rangeSeg">
+        <button type="button" data-range="week" aria-pressed="false">Week</button>
+        <button type="button" data-range="month" aria-pressed="true">Month</button>
+        <button type="button" data-range="year" aria-pressed="false">Year</button>
+        <button type="button" data-range="all" aria-pressed="false">All</button>
+      </div>
+      <div class="nav">
+        <button type="button" id="prev" aria-label="Previous period">&#8249;</button>
+        <span id="period" aria-live="polite"></span>
+        <button type="button" id="next" aria-label="Next period">&#8250;</button>
+        <button type="button" id="today">Today</button>
+      </div>
+      <div class="chip" id="filter" hidden><span id="filterName"></span>
+        <button type="button" id="clearFilter" aria-label="Clear game filter">&times;</button></div>
+      <span class="live" id="live" hidden></span>
+    </div>
+
+    <div class="tiles" id="tiles" data-host></div>
+
+    <section class="panel" aria-labelledby="monthTitle">
+      <div class="phead"><h2 id="monthTitle"></h2><span class="meta">Click a day for its timeline</span></div>
+      <div id="month" data-host></div>
+      <div class="legend" id="legend" data-host></div>
+    </section>
+
+    <section class="panel" id="dayPanel" aria-labelledby="dayTitle" hidden>
+      <div class="phead"><h2 id="dayTitle"></h2>
+        <span><span class="meta" id="dayMeta"></span> <button type="button" id="dayClose" aria-label="Close day timeline">&times; Close</button></span></div>
+      <div id="dayBody" data-host></div>
+    </section>
+
+    <section class="panel" aria-labelledby="heatTitle">
+      <div class="phead"><h2 id="heatTitle"></h2><span class="meta">Weeks start on Monday</span></div>
+      <div class="scroll"><div id="heat" data-host></div></div>
+      <div class="hleg" id="heatLegend"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="totalsTitle">
+      <div class="phead"><h2 id="totalsTitle"></h2><span class="meta">Click a game to filter everything</span></div>
+      <div id="totals" data-host></div>
+    </section>
   </div>
+  <div id="tip" role="tooltip" hidden></div>
   <div id="selftest" class="panel"></div>
 </main>
 
@@ -88,7 +266,10 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 var GT = {};
 GT.agg = (function () {
   var DAY_MS = 86400000;
-  var PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f", "#edc948", "#b07aa1", "#9c755f"]; // placeholder (#13)
+  // Categorical slots 1-8 (light-mode values of the validated dataviz palette:
+  // blue, orange, aqua, yellow, magenta, green, violet, red). The page themes
+  // them via CSS variables --c0..--c7; the index is what matters.
+  var PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
 
   function pad2(n) { return (n < 10 ? "0" : "") + n; }
 
@@ -131,16 +312,18 @@ GT.agg = (function () {
   // Local wall-clock milliseconds (as if the local time were UTC).
   function localMs(utcMs, offsetMin) { return utcMs + offsetMin * 60000; }
 
+  function pad4(n) { return (n < 10 ? "000" : n < 100 ? "00" : n < 1000 ? "0" : "") + n; }
+
   function dayKeyFromLocalMs(lms) {
     var d = new Date(lms);
-    return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate());
+    return pad4(d.getUTCFullYear()) + "-" + pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate());
   }
   function localDay(t) { return dayKeyFromLocalMs(localMs(t.utcMs, t.offsetMin)); }
   function localHour(t) { return new Date(localMs(t.utcMs, t.offsetMin)).getUTCHours(); }
   function localMinute(t) { return new Date(localMs(t.utcMs, t.offsetMin)).getUTCMinutes(); }
 
   function keyToLocalMs(key) { // 'YYYY-MM-DD' -> 00:00 of that day in "local-as-UTC" space
-    return Date.UTC(+key.slice(0, 4), +key.slice(5, 7) - 1, +key.slice(8, 10));
+    return utcMs(+key.slice(0, 4), +key.slice(5, 7), +key.slice(8, 10), 0, 0, 0);
   }
 
   // ---- Validation ----------------------------------------------------
@@ -155,7 +338,7 @@ GT.agg = (function () {
     if (typeof a !== "number" || !isFinite(a) || a < 0 || Math.floor(a) !== a) return null;
     // Contract: active_s <= end - start. Allow 1 s slack for tracker rounding.
     if (a > (end.utcMs - start.utcMs) / 1000 + 1) return null;
-    return { game: raw.game, source: source, start: start, end: end, active_s: a };
+    return { game: raw.game, source: source, start: start, end: end, active_s: a, open: raw.open === true };
   }
 
   // Validates a parsed JSON document. Throws Error with a user-facing message
@@ -173,39 +356,40 @@ GT.agg = (function () {
   }
 
   // ---- Splitting by local day -----------------------------------------
-  // Splits each session at local midnight. Midnights are taken in the START
-  // time's offset, except that the END day is always localDay(end) (computed in
-  // the END offset): if the offset changes inside a session (DST), the cut for
-  // the end day is taken at the end offset's midnight and no piece can land on
-  // a day after localDay(end). Before that cut the start offset is used, so
-  // near the DST change a boundary can be off by up to one hour.
+  // Splits each session at local midnight taken in the START time's offset,
+  // stopping once the next midnight's day is after localDay(end); the last
+  // piece's day is forced to localDay(end) (computed in the END offset), so no
+  // piece can land after the end day. If the offset changes inside a session
+  // (DST) a boundary can therefore be off by up to one hour.
   // active_s is distributed proportionally to wall-clock overlap with each day
   // (APPROXIMATION: the tracker doesn't record where pauses happened). Integer
   // seconds are kept by cumulative rounding, so pieces always sum to active_s.
-  // Piece: {game, source, day, startMs, endMs, offsetMin, active_s, sid, sessionActive_s}
+  // Piece: {game, source, day, startMs, endMs, offsetMin, endOffsetMin, active_s, open, sid, sessionActive_s}
+  // offsetMin is the offset in which startMs is read (the start offset, except for the
+  // last piece of a multi-piece session, which uses the end offset); endOffsetMin is the
+  // offset in which endMs is read. `open` marks the piece that is still in progress.
   // `sid` is the session's index within THIS call's input; do not mix pieces
   // from separate splitByDay calls in one byGame/summary call.
   function splitByDay(sessions) {
     var pieces = [];
     for (var i = 0; i < sessions.length; i++) {
-      var s = sessions[i], off = s.start.offsetMin;
+      var s = sessions[i], off = s.start.offsetMin, eoff = s.end.offsetMin;
       var sMs = s.start.utcMs, eMs = s.end.utcMs, total = eMs - sMs;
-      var endDay = localDay(s.end);
-      var endMid = keyToLocalMs(endDay) - s.end.offsetMin * 60000; // end day's midnight as a UTC instant
+      // A session ending exactly at local midnight belongs to the day before.
+      var endDay = dayKeyFromLocalMs(localMs(total > 0 ? eMs - 1 : eMs, eoff));
       var cuts = [sMs]; // piece boundaries as UTC instants
-      var midnight = Math.floor(localMs(sMs, off) / DAY_MS) * DAY_MS; // local midnight (local-as-UTC)
-      for (var m = midnight + DAY_MS; m - off * 60000 < endMid && m - off * 60000 < eMs; m += DAY_MS) cuts.push(m - off * 60000);
-      var lastDay = dayKeyFromLocalMs(localMs(cuts[cuts.length - 1], off));
-      if (endMid > cuts[cuts.length - 1] && endMid < eMs && lastDay !== endDay) cuts.push(endMid);
+      var m = Math.floor(localMs(sMs, off) / DAY_MS) * DAY_MS + DAY_MS; // next local midnight (local-as-UTC)
+      for (; m - off * 60000 < eMs && dayKeyFromLocalMs(m) <= endDay; m += DAY_MS) cuts.push(m - off * 60000);
       cuts.push(eMs);
-      var prevCum = 0;
-      for (var c = 0; c + 1 < cuts.length; c++) {
-        var cum = total > 0 ? Math.round(s.active_s * (cuts[c + 1] - sMs) / total) : s.active_s;
-        if (c + 2 === cuts.length) cum = s.active_s; // last piece takes the remainder exactly
-        var atEnd = cuts[c] >= endMid;
-        pieces.push({ game: s.game, source: s.source, day: atEnd ? endDay : dayKeyFromLocalMs(localMs(cuts[c], off)),
-                      startMs: cuts[c], endMs: cuts[c + 1], offsetMin: atEnd ? s.end.offsetMin : off,
-                      active_s: cum - prevCum, sid: i, sessionActive_s: s.active_s });
+      var prevCum = 0, n = cuts.length - 1;
+      for (var c = 0; c < n; c++) {
+        var last = c === n - 1;
+        var cum = last ? s.active_s : (total > 0 ? Math.round(s.active_s * (cuts[c + 1] - sMs) / total) : s.active_s);
+        pieces.push({ game: s.game, source: s.source,
+                      day: last ? endDay : dayKeyFromLocalMs(localMs(cuts[c], off)),
+                      startMs: cuts[c], endMs: cuts[c + 1],
+                      offsetMin: last && c > 0 ? eoff : off, endOffsetMin: last ? eoff : off,
+                      active_s: cum - prevCum, open: last && s.open, sid: i, sessionActive_s: s.active_s });
         prevCum = cum;
       }
     }
@@ -255,7 +439,8 @@ GT.agg = (function () {
       var p = pieces[i];
       if (!inRange(p.day, range)) continue;
       total += p.active_s;
-      if (p.active_s > 0) days.add(p.day);
+      if (p.active_s <= 0) continue;
+      days.add(p.day);
       if (p.sessionActive_s > longest) longest = p.sessionActive_s;
     }
     var games = byGame(pieces, range);
@@ -264,16 +449,59 @@ GT.agg = (function () {
 
   // ---- Ranges (inclusive 'YYYY-MM-DD' bounds) based on a reference local date ----
   function ranges(refDay) {
-    var y = +refDay.slice(0, 4), mo = +refDay.slice(5, 7) - 1;
+    var y = +refDay.slice(0, 4), mo = +refDay.slice(5, 7);
     var ref = keyToLocalMs(refDay);
     var dow = (new Date(ref).getUTCDay() + 6) % 7; // Monday = 0
     var monday = ref - dow * DAY_MS;
     return {
       week:  { from: dayKeyFromLocalMs(monday), to: dayKeyFromLocalMs(monday + 6 * DAY_MS) },
-      month: { from: dayKeyFromLocalMs(Date.UTC(y, mo, 1)), to: dayKeyFromLocalMs(Date.UTC(y, mo + 1, 0)) },
-      year:  { from: y + "-01-01", to: y + "-12-31" },
+      month: { from: dayKeyFromLocalMs(utcMs(y, mo, 1, 0, 0, 0)), to: dayKeyFromLocalMs(utcMs(y, mo + 1, 0, 0, 0, 0)) },
+      year:  { from: pad4(y) + "-01-01", to: pad4(y) + "-12-31" },
       all:   null
     };
+  }
+
+  // ---- Calendar helpers ('YYYY-MM-DD' keys) ---------------------------------
+  function addDays(key, n) { return dayKeyFromLocalMs(keyToLocalMs(key) + n * DAY_MS); }
+  function addMonths(key, n) { // first day of the month n months away
+    return dayKeyFromLocalMs(utcMs(+key.slice(0, 4), +key.slice(5, 7) + n, 1, 0, 0, 0));
+  }
+  function addYears(key, n) { return pad4(+key.slice(0, 4) + n) + "-01-01"; }
+  function weekdayIndex(key) { return (new Date(keyToLocalMs(key)).getUTCDay() + 6) % 7; } // Monday = 0
+
+  // Month grid, Monday-first: array of weeks, each 7 day keys (may spill into adjacent months).
+  function monthGrid(key) {
+    var r = ranges(key).month, d = addDays(r.from, -weekdayIndex(r.from)), weeks = [];
+    while (d <= r.to) {
+      var w = [];
+      for (var i = 0; i < 7; i++) { w.push(d); d = addDays(d, 1); }
+      weeks.push(w);
+    }
+    return weeks;
+  }
+
+  // Year grid for the heatmap: weeks as columns of 7 rows (Monday first); days outside the year are null.
+  function yearGrid(year) {
+    var from = pad4(year) + "-01-01", to = pad4(year) + "-12-31";
+    var d = addDays(from, -weekdayIndex(from)), weeks = [];
+    while (d <= to) {
+      var w = [];
+      for (var i = 0; i < 7; i++) { w.push(d >= from && d <= to ? d : null); d = addDays(d, 1); }
+      weeks.push(w);
+    }
+    return weeks;
+  }
+
+  // Sequential bucket 0..n for a value (0 = no play). sqrt keeps short days visible next to long ones.
+  function bucket(v, max, n) {
+    if (!(v > 0) || !(max > 0)) return 0;
+    return Math.min(n, 1 + Math.floor((n - 1) * Math.sqrt(Math.min(1, v / max))));
+  }
+
+  // 'HH:MM' wall clock of an instant in a given offset.
+  function clock(utcMs, offsetMin) {
+    var d = new Date(localMs(utcMs, offsetMin));
+    return pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes());
   }
 
   // ---- Presentation helpers ------------------------------------------
@@ -294,7 +522,9 @@ GT.agg = (function () {
   return { parseTime: parseTime, localDay: localDay, localHour: localHour, localMinute: localMinute,
            validateSession: validateSession, parseDocument: parseDocument, splitByDay: splitByDay,
            byDay: byDay, byGame: byGame, summary: summary, ranges: ranges, gameColor: gameColor,
-           gameColorIndex: gameColorIndex, palette: PALETTE, formatDuration: formatDuration };
+           gameColorIndex: gameColorIndex, palette: PALETTE, formatDuration: formatDuration,
+           addDays: addDays, addMonths: addMonths, addYears: addYears, weekdayIndex: weekdayIndex,
+           monthGrid: monthGrid, yearGrid: yearGrid, bucket: bucket, clock: clock };
 })();
 </script>
 
@@ -465,19 +695,83 @@ GT.selftest = function () {
     return (a === A.gameColorIndex("Hades") && a >= 0 && a < A.palette.length &&
             A.gameColor("Hades") === A.palette[a] && /^#[0-9a-f]{6}$/.test(A.gameColor(""))) || "bad";
   });
+  test("split: spring-forward span 03-28 22:00+01 -> 03-29 23:30+02 credits 7200 s to 03-28", function () {
+    var p = A.splitByDay([S("G", "2026-03-28T22:00:00+01:00", "2026-03-29T23:30:00+02:00", 88200)]);
+    return days(p) === "2026-03-28:7200,2026-03-29:81000" || days(p);
+  });
+  test("split: first piece carries the start offset (10-25 01:00+02 -> 05:00+01)", function () {
+    var p = A.splitByDay([S("G", "2026-10-25T01:00:00+02:00", "2026-10-25T05:00:00+01:00", 18000)]);
+    return (p.length === 1 && p[0].day === "2026-10-25" && p[0].offsetMin === 120 && p[0].endOffsetMin === 60) || JSON.stringify(p);
+  });
+  test("split: multi-piece offsets (first = start offset, last = end offset)", function () {
+    var p = A.splitByDay([S("G", "2026-10-24T22:00:00+02:00", "2026-10-25T23:30:00+01:00", 95400)]);
+    return (p.length === 2 && p[0].offsetMin === 120 && p[0].endOffsetMin === 120 && p[1].offsetMin === 60 && p[1].endOffsetMin === 60) || JSON.stringify(p);
+  });
+  test("split: open flag only on the last piece, and counted in totals", function () {
+    var s = A.validateSession({ game: "G", source: "steam", start: "2026-08-10T23:00:00+02:00", end: "2026-08-11T01:00:00+02:00", active_s: 6000, open: true });
+    var p = A.splitByDay([s]);
+    return (s.open === true && !p[0].open && p[1].open === true && A.summary(p, null).total_s === 6000 &&
+            A.validateSession({ game: "G", start: "2026-08-10T23:00:00+02:00", end: "2026-08-10T23:30:00+02:00", active_s: 60 }).open === false) || JSON.stringify(p);
+  });
+  test("summary: longest_session_s ignores zero-active pieces", function () {
+    var p = A.splitByDay([S("G", "2026-08-10T23:00:00+02:00", "2026-08-11T01:00:00+02:00", 1)]);
+    var sm = A.summary(p, { from: "2026-08-11", to: "2026-08-11" });
+    return (sm.longest_session_s === 0 && sm.days_played === 0 && A.summary(p, null).longest_session_s === 1) || JSON.stringify(sm);
+  });
+  test("years are zero-padded in day keys and ranges", function () {
+    var t = A.parseTime("0099-05-10T10:00:00+00:00"), r = A.ranges("0099-05-10");
+    return (A.localDay(t) === "0099-05-10" && r.year.from === "0099-01-01" && r.month.to === "0099-05-31") || JSON.stringify(r);
+  });
+  test("calendar helpers: addDays / addMonths / addYears", function () {
+    return (A.addDays("2026-02-28", 1) === "2026-03-01" && A.addDays("2026-03-01", -1) === "2026-02-28" &&
+            A.addMonths("2026-12-15", 1) === "2027-01-01" && A.addMonths("2026-01-31", -1) === "2025-12-01" &&
+            A.addYears("2026-11-07", -1) === "2025-01-01") || "bad";
+  });
+  test("monthGrid: Monday-first weeks (Nov 2026 starts Sunday -> 6 weeks from 10-26)", function () {
+    var g = A.monthGrid("2026-11-07");
+    return (g.length === 6 && g[0][0] === "2026-10-26" && g[0][6] === "2026-11-01" && g[5][0] === "2026-11-30" &&
+            A.monthGrid("2027-02-10").length === 4) || g.length;
+  });
+  test("yearGrid: 53 week columns for 2026, nulls outside the year", function () {
+    var g = A.yearGrid(2026);
+    return (g.length === 53 && g[0][0] === null && g[0][3] === "2026-01-01" && g[52][3] === "2026-12-31" && g[52][4] === null) || g.length;
+  });
+  test("bucket: 0 for no play, scales to n at max", function () {
+    return (A.bucket(0, 100, 7) === 0 && A.bucket(1, 100, 7) === 1 && A.bucket(25, 100, 7) === 4 && A.bucket(100, 100, 7) === 7 &&
+            A.bucket(500, 100, 7) === 7 && A.bucket(5, 0, 7) === 0) || "bad";
+  });
+  test("clock: wall time in a given offset", function () {
+    return (A.clock(Date.UTC(2026, 10, 7, 19), 60) === "20:00" && A.clock(Date.UTC(2026, 10, 7, 19), -330) === "13:30") || "bad";
+  });
+  test("perf: 10k sessions parse + split + aggregate in < 200 ms", function () {
+    var raw = [], base = Date.UTC(2024, 0, 1, 18);
+    function iso(ms) { return new Date(ms).toISOString().slice(0, 19) + "Z"; }
+    for (var i = 0; i < 10000; i++) {
+      var st = base + i * 3 * 3600000 + (i % 7) * 600000;
+      raw.push({ game: "Game " + (i % 40), source: "steam", start: iso(st), end: iso(st + 5400000), active_s: 5000 });
+    }
+    var t0 = Date.now();
+    var d = A.parseDocument({ version: 1, sessions: raw }), p = A.splitByDay(d.sessions);
+    A.byDay(p); A.byGame(p, null); A.summary(p, null);
+    var ms = Date.now() - t0;
+    return (d.sessions.length === 10000 && ms < 200) || ms + " ms";
+  });
   return results;
 };
 </script>
 
 <!-- ===================================================================
-     UI + data loading (placeholders; real charts arrive in #13)
+     UI: data loading + render functions (all DOM text via textContent / createElementNS)
      =================================================================== -->
 <script>
 "use strict";
 (function () {
-  var A = GT.agg, LS_KEY = "gametime.src";
+  var A = GT.agg, LS_KEY = "gametime.src", SVGNS = "http://www.w3.org/2000/svg", DAY_MS = 86400000;
   var $ = function (id) { return document.getElementById(id); };
   function pad(n) { return (n < 10 ? "0" : "") + n; }
+  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var MON3 = MONTHS.map(function (m) { return m.slice(0, 3); });
+  var DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
   function el(tag, props, children) {
     var e = document.createElement(tag);
@@ -485,6 +779,13 @@ GT.selftest = function () {
     (children || []).forEach(function (c) { e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
     return e;
   }
+  function svg(tag, attrs, children) {
+    var e = document.createElementNS(SVGNS, tag);
+    if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
+    (children || []).forEach(function (c) { e.appendChild(c); });
+    return e;
+  }
+  function svgText(x, y, s, extra) { var t = svg("text", { x: x, y: y }); if (extra) for (var k in extra) t.setAttribute(k, extra[k]); t.textContent = s; return t; }
 
   function showError(msg) { var e = $("error"); e.textContent = msg; e.style.display = msg ? "block" : "none"; }
 
@@ -561,69 +862,356 @@ GT.selftest = function () {
     });
   }
 
-  // ---- Rendering --------------------------------------------------------
-  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  // ---- State ------------------------------------------------------------
+  // pieces: all day pieces; fp: pieces after the game filter; dayMap/maxDay: byDay(fp) and its max day total.
+  var state = null;
+
+  function colorVar(name) { return "var(--c" + A.gameColorIndex(name) + ")"; }
+  function inkVar(name) { return "var(--cf" + A.gameColorIndex(name) + ")"; }
+  function swatch(name) { var s = el("span", { className: "sw" }); s.style.background = colorVar(name); return s; }
+
+  function fmtDay(k) { return DOW[A.weekdayIndex(k)] + ", " + MON3[+k.slice(5, 7) - 1] + " " + (+k.slice(8)) + ", " + k.slice(0, 4); }
+  function fmtShort(k) { return MON3[+k.slice(5, 7) - 1] + " " + (+k.slice(8)); }
+  function fmtOffset(min) { var a = Math.abs(min); return "UTC" + (min < 0 ? "-" : "+") + pad(Math.floor(a / 60)) + ":" + pad(a % 60); }
+  function periodLabel(range, rng) {
+    if (range === "all") return "All time";
+    if (range === "week") return fmtShort(rng.from) + " – " + fmtShort(rng.to) + ", " + rng.to.slice(0, 4);
+    if (range === "month") return MONTHS[+rng.from.slice(5, 7) - 1] + " " + rng.from.slice(0, 4);
+    return rng.from.slice(0, 4);
+  }
+  function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
 
   function show(data, label) {
+    var t0 = performance.now();
     var pieces = A.splitByDay(data.sessions);
     // "Today" comes from the generated stamp in the game PC's offset, so it never depends on the viewer's time zone.
     var refDay;
     if (data.generated) refDay = A.localDay(data.generated);
     else if (pieces.length) refDay = pieces.reduce(function (mx, p) { return p.day > mx ? p.day : mx; }, "0000-00-00");
     else refDay = "1970-01-01";
-    var month = A.ranges(refDay).month;
+    var byDayPieces = new Map(), open = [];
+    pieces.forEach(function (p) {
+      var a = byDayPieces.get(p.day);
+      if (a) a.push(p); else byDayPieces.set(p.day, [p]);
+      if (p.open) open.push(p);
+    });
+    state = { pieces: pieces, byDayPieces: byDayPieces, open: open, refDay: refDay, anchor: refDay, range: "month",
+              game: null, selDay: null, showAll: false, fp: pieces, dayMap: null, maxDay: 0 };
+    // Optional deep links: ?day=YYYY-MM-DD opens that day's timeline, ?range=week|month|year|all.
+    var q = new URLSearchParams(location.search), qd = q.get("day"), qr = q.get("range");
+    if (qd && /^\d{4}-\d\d-\d\d$/.test(qd)) { state.selDay = qd; state.anchor = qd; }
+    if (qr && ["week", "month", "year", "all"].indexOf(qr) >= 0) state.range = qr;
     showError("");
     $("app").style.display = "";
     $("loader").classList.remove("open");
     $("srcinfo").textContent = label + " · " + data.sessions.length + " sessions";
     $("skipped").textContent = data.skipped ? " · " + data.skipped + " skipped " : " ";
     $("generated").textContent = data.generated ? "Generated: " + refDay + " " + pad(A.localHour(data.generated)) + ":" +
-      pad(A.localMinute(data.generated)) + " (game PC time)" : "";
-    $("monthtitle").textContent = MONTHS[+refDay.slice(5, 7) - 1] + " " + refDay.slice(0, 4);
-    renderTiles(A.summary(pieces, month));
-    renderGames(A.byGame(pieces, month));
-    renderDays(A.byDay(pieces), month);
+      pad(A.localMinute(data.generated)) + " (game PC time, " + fmtOffset(data.generated.offsetMin) + ")" : "";
+    applyFilter();
+    render();
+    document.documentElement.setAttribute("data-render-ms", String(Math.round(performance.now() - t0)));
   }
 
-  function renderTiles(s) {
+  function applyFilter() {
+    var g = state.game;
+    state.fp = g ? state.pieces.filter(function (p) { return p.game === g; }) : state.pieces;
+    state.dayMap = A.byDay(state.fp);
+    var mx = 0;
+    state.dayMap.forEach(function (e) { if (e.total_s > mx) mx = e.total_s; });
+    state.maxDay = mx;
+  }
+
+  // Re-render everything, keeping keyboard focus on the same logical control.
+  function rerender() {
+    var a = document.activeElement, key = null;
+    if (a && a.dataset && (a.dataset.day || a.dataset.game)) {
+      var host = a.closest("[data-host]");
+      key = { host: host && host.id, attr: a.dataset.day ? "data-day" : "data-game", val: a.dataset.day || a.dataset.game };
+    }
+    render();
+    if (!key || !key.host) return;
+    var cands = $(key.host).querySelectorAll("[" + key.attr + "]");
+    for (var i = 0; i < cands.length; i++) if (cands[i].getAttribute(key.attr) === key.val && cands[i].focus) { cands[i].focus({ preventScroll: true }); break; }
+  }
+
+  function render() {
+    var rng = A.ranges(state.anchor)[state.range];
+    renderControls(rng);
+    renderSummary(A.summary(state.fp, rng));
+    renderMonth();
+    renderDay();
+    renderHeatmap();
+    renderTotals(rng);
+  }
+
+  // ---- Controls ---------------------------------------------------------
+  function renderControls(rng) {
+    Array.prototype.forEach.call($("rangeSeg").querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.range === state.range));
+    });
+    $("period").textContent = periodLabel(state.range, rng);
+    $("prev").disabled = $("next").disabled = state.range === "all";
+    $("filter").hidden = !state.game;
+    $("filterName").textContent = state.game ? "Game: " + state.game : "";
+    var live = $("live");
+    if (state.open.length) { live.hidden = false; live.textContent = "Playing now: " + state.open[state.open.length - 1].game; }
+    else live.hidden = true;
+  }
+
+  function shiftAnchor(dir) {
+    var a = state.anchor;
+    state.anchor = state.range === "week" ? A.addDays(a, 7 * dir) : state.range === "month" ? A.addMonths(a, dir) : A.addYears(a, dir);
+    rerender();
+  }
+
+  // ---- Summary tiles ------------------------------------------------------
+  function renderSummary(s) {
     var t = $("tiles"); t.textContent = "";
-    [["Total", A.formatDuration(s.total_s)], ["Days played", String(s.days_played)],
-     ["Longest session", A.formatDuration(s.longest_session_s)], ["Top game", s.top_game || "—"]]
+    [["Total time", A.formatDuration(s.total_s), null], ["Days played", String(s.days_played), null],
+     ["Longest session", A.formatDuration(s.longest_session_s), null], ["Top game", s.top_game || "—", s.top_game]]
       .forEach(function (x) {
-        t.appendChild(el("div", { className: "panel tile" },
-          [el("div", { className: "label", textContent: x[0] }), el("div", { className: "value", textContent: x[1] })]));
+        var kids = [el("div", { className: "label", textContent: x[0] }), el("div", { className: "value", textContent: x[1] })];
+        var tile = el(x[2] ? "button" : "div", { className: "panel tile" }, kids);
+        if (x[2]) { tile.type = "button"; tile.setAttribute("data-game", x[2]); tile.setAttribute("aria-pressed", String(state.game === x[2])); tile.title = "Filter by " + x[2]; }
+        t.appendChild(tile);
       });
   }
 
-  function renderTable(table, head, rows) {
-    table.textContent = "";
-    var tr = el("tr"); head.forEach(function (h, i) { tr.appendChild(el("th", { textContent: h, className: i ? "n" : "" })); });
-    table.appendChild(el("thead", null, [tr]));
+  // ---- Month calendar -----------------------------------------------------
+  function dayGames(e) { return Array.from(e.perGame).sort(function (a, b) { return b[1] - a[1] || (a[0] < b[0] ? -1 : 1); }); }
+
+  function dayLabel(k, e, live) {
+    var s = fmtDay(k);
+    if (!e || e.total_s <= 0) s += ": no play";
+    else s += ": " + A.formatDuration(e.total_s) + " (" + dayGames(e).slice(0, 4).map(function (g) { return g[0] + " " + A.formatDuration(g[1]); }).join(", ") + ")";
+    return live ? s + ", playing now" : s;
+  }
+  function dayTip(k, e, live) {
+    var lines = [fmtDay(k)];
+    if (!e || e.total_s <= 0) lines.push("No play");
+    else {
+      lines.push(A.formatDuration(e.total_s) + " total");
+      var gs = dayGames(e);
+      gs.slice(0, 5).forEach(function (g) { lines.push(g[0] + "  " + A.formatDuration(g[1])); });
+      if (gs.length > 5) lines.push("+" + (gs.length - 5) + " more");
+    }
+    if (live) lines.push("Playing now");
+    return lines.join("\n");
+  }
+  function isLive(k) {
+    for (var i = 0; i < state.open.length; i++) { var p = state.open[i]; if (p.day === k && (!state.game || p.game === state.game)) return true; }
+    return false;
+  }
+
+  function renderMonth() {
+    var host = $("month"); host.textContent = "";
+    var a = state.anchor, mk = a.slice(0, 7);
+    $("monthTitle").textContent = MONTHS[+a.slice(5, 7) - 1] + " " + a.slice(0, 4);
+    var grid = el("div", { className: "cal" });
+    grid.setAttribute("role", "group"); grid.setAttribute("aria-label", "Month calendar");
+    DOW.forEach(function (d) { grid.appendChild(el("div", { className: "dow", textContent: d })); });
+    A.monthGrid(a).forEach(function (w) {
+      w.forEach(function (k) {
+        var e = state.dayMap.get(k), total = e ? e.total_s : 0, live = isLive(k);
+        var b = A.bucket(total, state.maxDay, 7);
+        var cell = el("button", { type: "button", className: "day b" + b + (k.slice(0, 7) !== mk ? " out" : "") + (k === state.refDay ? " today" : "") + (k === state.selDay ? " sel" : "") });
+        cell.setAttribute("data-day", k);
+        cell.setAttribute("aria-label", dayLabel(k, e, live) + (k === state.refDay ? ", today" : ""));
+        cell.setAttribute("data-tip", dayTip(k, e, live));
+        cell.appendChild(el("span", { className: "dn", textContent: String(+k.slice(8)) }));
+        cell.appendChild(el("span", { className: "dt", textContent: total > 0 ? A.formatDuration(total) : "" }));
+        var bar = el("span", { className: "bar" + (total > 0 ? "" : " empty") });
+        if (total > 0) {
+          var gs = dayGames(e), rest = 0;
+          gs.forEach(function (g, i) {
+            if (i < 3) { var seg = el("i"); seg.style.flexGrow = String(g[1]); seg.style.flexBasis = "0"; seg.style.background = colorVar(g[0]); bar.appendChild(seg); }
+            else rest += g[1];
+          });
+          if (rest > 0) { var o = el("i"); o.style.flexGrow = String(rest); o.style.flexBasis = "0"; o.style.background = "var(--other)"; bar.appendChild(o); }
+        }
+        cell.appendChild(bar);
+        if (live) cell.appendChild(el("span", { className: "ldot" }));
+        grid.appendChild(cell);
+      });
+    });
+    host.appendChild(grid);
+
+    // Legend: games played this month (unfiltered), also a filter control.
+    var lg = $("legend"); lg.textContent = "";
+    var games = A.byGame(state.pieces, A.ranges(a).month);
+    games.slice(0, 10).forEach(function (g) {
+      var c = el("button", { type: "button", className: "lchip" }, [swatch(g.game), g.game]);
+      c.setAttribute("data-game", g.game); c.setAttribute("aria-pressed", String(state.game === g.game));
+      lg.appendChild(c);
+    });
+    if (games.length > 10) lg.appendChild(el("span", { className: "meta", textContent: "+" + (games.length - 10) + " more (see per-game totals)" }));
+  }
+
+  // ---- Day timeline -------------------------------------------------------
+  function renderDay() {
+    var panel = $("dayPanel"), k = state.selDay;
+    panel.hidden = !k;
+    if (!k) return;
+    var body = $("dayBody"); body.textContent = "";
+    $("dayTitle").textContent = fmtDay(k);
+    var ps = (state.byDayPieces.get(k) || []).filter(function (p) { return !state.game || p.game === state.game; })
+      .sort(function (a, b) { return a.startMs - b.startMs; });
+    var total = 0; ps.forEach(function (p) { total += p.active_s; });
+    $("dayMeta").textContent = ps.length ? A.formatDuration(total) + " active · times in game PC time (" + fmtOffset(ps[0].offsetMin) + ")" +
+      (state.game ? " · " + state.game + " only" : "") : "";
+    if (!ps.length) { body.appendChild(el("div", { className: "empty-note", textContent: "No sessions on this day" + (state.game ? " for " + state.game : "") + "." })); return; }
+
+    var dayStart = Date.parse(k + "T00:00:00Z");
+    var axis = el("div", { className: "axis" });
+    axis.setAttribute("role", "group"); axis.setAttribute("aria-label", "24-hour timeline for " + fmtDay(k));
+    for (var h = 0; h <= 24; h += 3) {
+      var tk = el("div", { className: "tick" + (h === 0 ? " first" : h === 24 ? " lastt" : "") }, [el("span", { textContent: pad(h) })]);
+      tk.style.left = (h / 24 * 100) + "%";
+      if (h === 24) { tk.style.left = "auto"; tk.style.right = "0"; }
+      axis.appendChild(tk);
+    }
+    ps.forEach(function (p) {
+      var x = (p.startMs + p.offsetMin * 60000 - dayStart) / DAY_MS, w = (p.endMs - p.startMs) / DAY_MS;
+      if (x < 0) { w += x; x = 0; }
+      if (x + w > 1) w = 1 - x;
+      var times = A.clock(p.startMs, p.offsetMin) + "–" + A.clock(p.endMs, p.endOffsetMin);
+      var desc = p.game + ", " + times + ", " + A.formatDuration(p.active_s) + " active" + (p.open ? ", playing now" : "");
+      var b = el("button", { type: "button", className: "blk" + (p.open ? " open" : ""), textContent: p.game });
+      b.style.left = (Math.max(0, x) * 100) + "%"; b.style.width = (Math.max(w, 0) * 100) + "%";
+      b.style.background = colorVar(p.game); b.style.color = inkVar(p.game);
+      b.setAttribute("data-game", p.game); b.setAttribute("aria-label", desc);
+      b.setAttribute("data-tip", p.game + "\n" + times + " local\n" + A.formatDuration(p.active_s) + " active" + (p.open ? "\nPlaying now" : ""));
+      axis.appendChild(b);
+    });
+    body.appendChild(axis);
+
+    var table = el("table");
+    table.appendChild(el("thead", null, [el("tr", null, [el("th", { textContent: "Game" }), el("th", { textContent: "Time" }), el("th", { className: "n", textContent: "Active" })])]));
     var tb = el("tbody");
-    if (!rows.length) tb.appendChild(el("tr", null, [el("td", { colSpan: head.length, textContent: "No sessions in this period." })]));
-    rows.forEach(function (r) {
-      var row = el("tr");
-      r.forEach(function (c, i) { row.appendChild(c instanceof Node ? c : el("td", { textContent: c, className: i ? "n" : "" })); });
-      tb.appendChild(row);
+    ps.forEach(function (p) {
+      var g = el("td", null, [swatch(p.game), p.game]);
+      if (p.open) g.appendChild(el("span", { className: "badge", textContent: "playing now" }));
+      tb.appendChild(el("tr", null, [g, el("td", { textContent: A.clock(p.startMs, p.offsetMin) + "–" + A.clock(p.endMs, p.endOffsetMin) }),
+                                     el("td", { className: "n", textContent: A.formatDuration(p.active_s) })]));
     });
     table.appendChild(tb);
+    body.appendChild(table);
   }
 
-  function renderGames(games) {
-    renderTable($("games"), ["Game", "Total", "Sessions", "Avg", "Longest", "Days"], games.map(function (g) {
-      var sw = el("span", { className: "swatch" }); sw.style.background = A.gameColor(g.game);
-      return [el("td", null, [sw, g.game + " (" + g.source + ")"]), A.formatDuration(g.total_s), String(g.sessions),
-              A.formatDuration(g.avg_session_s), A.formatDuration(g.longest_s), String(g.days)];
-    }));
+  // ---- Year heatmap -------------------------------------------------------
+  function renderHeatmap() {
+    var host = $("heat"); host.textContent = "";
+    var year = +state.anchor.slice(0, 4), weeks = A.yearGrid(year);
+    $("heatTitle").textContent = "Year " + year;
+    var P = 14, C = 11, LX = 28, TY = 16;
+    var root = svg("svg", { viewBox: "0 0 " + (LX + weeks.length * P) + " " + (TY + 7 * P), role: "group", "aria-label": "Year heatmap " + year });
+    ["Mon", "Wed", "Fri"].forEach(function (d, i) { root.appendChild(svgText(0, TY + i * 2 * P + 9, d)); });
+    var lastMonth = -1;
+    weeks.forEach(function (w, c) {
+      var first = null; w.forEach(function (k) { if (k && !first) first = k; });
+      // Label the column that contains the 1st of a month (or Jan 1).
+      w.forEach(function (k) {
+        if (k && k.slice(8) === "01") { var mi = +k.slice(5, 7) - 1; if (mi !== lastMonth) { root.appendChild(svgText(LX + c * P, 10, MON3[mi])); lastMonth = mi; } }
+      });
+      w.forEach(function (k, r) {
+        if (!k) return;
+        var e = state.dayMap.get(k), total = e ? e.total_s : 0, live = isLive(k);
+        var rect = svg("rect", { x: LX + c * P, y: TY + r * P, width: C, height: C, rx: 2,
+          "class": "hc b" + A.bucket(total, state.maxDay, 7) + (k === state.refDay ? " today" : "") + (k === state.selDay ? " sel" : ""),
+          "data-day": k, role: "button", "aria-label": dayLabel(k, e, live), "data-tip": dayTip(k, e, live) });
+        root.appendChild(rect);
+      });
+    });
+    host.appendChild(root);
+
+    var lg = $("heatLegend"); lg.textContent = "";
+    lg.appendChild(document.createTextNode("Less"));
+    for (var b = 0; b <= 7; b++) lg.appendChild(el("i", { className: "b" + b }));
+    lg.appendChild(document.createTextNode("More" + (state.maxDay ? " (busiest day: " + A.formatDuration(state.maxDay) + ")" : "")));
   }
 
-  function renderDays(dayMap, month) {
-    var keys = Array.from(dayMap.keys()).filter(function (k) { return k >= month.from && k <= month.to; }).sort().reverse();
-    renderTable($("days"), ["Day", "Total", "Games"], keys.map(function (k) {
-      var e = dayMap.get(k);
-      return [k, A.formatDuration(e.total_s), Array.from(e.perGame.keys()).join(", ")];
-    }));
+  // ---- Per-game totals ----------------------------------------------------
+  var TOTALS_CAP = 12;
+  function renderTotals(rng) {
+    $("totalsTitle").textContent = "Per game · " + periodLabel(state.range, rng);
+    var host = $("totals"); host.textContent = "";
+    var games = A.byGame(state.pieces, rng);
+    if (!games.length) { host.appendChild(el("div", { className: "empty-note", textContent: "No sessions in this period." })); return; }
+    var all = 0; games.forEach(function (g) { all += g.total_s; });
+    var max = games[0].total_s, shown = state.showAll ? games : games.slice(0, TOTALS_CAP);
+    shown.forEach(function (g) {
+      var share = all > 0 ? Math.round(g.total_s / all * 100) : 0;
+      var fill = el("i"); fill.style.width = (g.total_s / max * 100) + "%"; fill.style.background = colorVar(g.game);
+      var meta = plural(g.sessions, "session") + " · avg " + A.formatDuration(g.avg_session_s) + " · " + share + "% of total";
+      var row = el("button", { type: "button", className: "grow" + (state.game && state.game !== g.game ? " dim" : "") }, [
+        el("span", { className: "gname" }, [swatch(g.game), el("span", { className: "t", textContent: g.game + " (" + g.source + ")" })]),
+        el("span", { className: "gbar" }, [fill]),
+        el("span", { className: "gval", textContent: A.formatDuration(g.total_s) }),
+        el("span", { className: "gmeta", textContent: meta })]);
+      row.setAttribute("data-game", g.game); row.setAttribute("aria-pressed", String(state.game === g.game));
+      row.setAttribute("data-tip", g.game + "\n" + A.formatDuration(g.total_s) + " total\n" + meta);
+      host.appendChild(row);
+    });
+    if (games.length > TOTALS_CAP) {
+      var more = el("button", { type: "button", className: "more", id: "showAll", textContent: state.showAll ? "Show top " + TOTALS_CAP : "Show all " + games.length + " games" });
+      host.appendChild(more);
+    }
   }
+
+  // ---- Tooltip (one shared element; same content on hover and keyboard focus) ----
+  var tip = $("tip");
+  function showTip(t) {
+    var s = t.getAttribute("data-tip");
+    if (!s) return hideTip();
+    tip.textContent = "";
+    s.split("\n").forEach(function (ln, i) { tip.appendChild(el("div", { className: i ? "" : "tt", textContent: ln })); });
+    tip.hidden = false;
+    var r = t.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+    var x = Math.max(4, Math.min(r.left + r.width / 2 - w / 2, document.documentElement.clientWidth - w - 4));
+    var y = r.top - h - 6; if (y < 4) y = r.bottom + 6;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  function hideTip() { tip.hidden = true; }
+  function tipTarget(e) { return e.target && e.target.closest ? e.target.closest("[data-tip]") : null; }
+  document.addEventListener("pointerover", function (e) { var t = tipTarget(e); if (t) showTip(t); else hideTip(); });
+  document.addEventListener("focusin", function (e) { var t = tipTarget(e); if (t) showTip(t); else hideTip(); });
+  document.addEventListener("focusout", hideTip);
+  document.addEventListener("pointerleave", hideTip);
+  window.addEventListener("scroll", hideTip, { passive: true });
+
+  // ---- Interaction ----------------------------------------------------------
+  function toggleDay(k) {
+    var open = state.selDay !== k;
+    state.selDay = open ? k : null;
+    rerender();
+    if (open) $("dayPanel").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  function toggleGame(g) {
+    state.game = state.game === g ? null : g;
+    applyFilter();
+    rerender();
+  }
+  $("app").addEventListener("click", function (e) {
+    if (!state || !e.target.closest) return;
+    var t = e.target.closest("[data-day],[data-game],#showAll");
+    if (!t) return;
+    hideTip();
+    if (t.id === "showAll") { state.showAll = !state.showAll; rerender(); }
+    else if (t.hasAttribute("data-day")) toggleDay(t.getAttribute("data-day"));
+    else toggleGame(t.getAttribute("data-game"));
+  });
+  Array.prototype.forEach.call($("rangeSeg").querySelectorAll("button"), function (b) {
+    b.onclick = function () { state.range = b.dataset.range; rerender(); };
+  });
+  $("prev").onclick = function () { shiftAnchor(-1); };
+  $("next").onclick = function () { shiftAnchor(1); };
+  $("today").onclick = function () { state.anchor = state.refDay; rerender(); };
+  $("clearFilter").onclick = function () { state.game = null; applyFilter(); rerender(); };
+  $("dayClose").onclick = function () { state.selDay = null; rerender(); };
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && state && state.selDay) { state.selDay = null; rerender(); }
+  });
 
   // ---- Self-test page ---------------------------------------------------
   function runSelftest() {
@@ -659,7 +1247,10 @@ GT.selftest = function () {
     if (e.dataTransfer.files[0]) loadFromFile(e.dataTransfer.files[0]);
   });
 
-  if (new URLSearchParams(location.search).get("selftest") === "1") runSelftest();
+  var qs = new URLSearchParams(location.search);
+  var theme = qs.get("theme"); // debug / screenshots: ?theme=dark|light
+  if (theme === "dark" || theme === "light") document.documentElement.setAttribute("data-theme", theme);
+  if (qs.get("selftest") === "1") runSelftest();
   else start();
 })();
 </script>
