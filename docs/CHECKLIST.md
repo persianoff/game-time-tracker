@@ -78,7 +78,7 @@ Start a game first and keep it focused through the `stop` step below, so there i
 
 - [ ] Open `viewer\index.html` locally and load `viewer\sample-sessions.json`: month, heatmap, totals, day timeline, a session crossing midnight, and dark mode all look right.
 - [ ] Set `"http_port": 8765` in `%APPDATA%\GameTime\config.json`, then `.\gametime.exe stop` and `.\gametime.exe autostart on` (or start `.\gametime-tracker.exe`).
-- [ ] Check `%APPDATA%\GameTime\log.txt` contains `http endpoint listening on 0.0.0.0:8765`. If it says `http endpoint disabled (port 8765): ...`, the port is taken. If it says `config error (...); using defaults`, fix the JSON syntax. As a syntax check, `.\gametime.exe status` refuses to run with a malformed config.
+- [ ] Check `%APPDATA%\GameTime\log.txt` contains `http endpoint listening on 0.0.0.0:8765`. If it says `http endpoint disabled (port 8765): ...`, the port is taken. If it says `config error (...); using defaults`, fix the JSON syntax. As a syntax check, `.\gametime.exe scan` prints `cannot read config: ...` when the JSON is malformed.
 - [ ] Add the firewall rule (administrator PowerShell, Private profile, local subnet only):
 
   ```powershell
