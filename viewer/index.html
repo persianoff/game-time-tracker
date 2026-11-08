@@ -56,7 +56,9 @@
   --sf6: #ffffff; --sf7: #ffffff;
 }
 :root[data-theme] { color-scheme: light; }
-.oldnote { display: block; }
+@media (prefers-color-scheme: dark) { .oldnote { display: block; } }
+:root[data-theme="dark"] .oldnote { display: block; }
+:root[data-theme="light"] .oldnote { display: none; }
 }
 
 * { box-sizing: border-box; }
@@ -124,8 +126,9 @@ button.tile:hover { border-color: var(--accent); }
 .lchip[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 td .sw { margin-right: 6px; }
 #dayTitle:focus { outline: none; }
-.bar i.rest, .sw.rest { background-image: repeating-linear-gradient(135deg, var(--panel) 0 2px, transparent 2px 5px); }
+.bar i.rest, .sw.rest { background-color: var(--other); background-image: repeating-linear-gradient(135deg, var(--panel) 0 2px, transparent 2px 5px); }
 .lnote { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); padding: 2px 4px; }
+.sw.other { background-color: var(--other); }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
 
 /* day timeline */
@@ -395,7 +398,9 @@ GT.agg = (function () {
   // stopping once the next midnight's day is after localDay(end); the last
   // piece's day is forced to localDay(end) (computed in the END offset), so no
   // piece can land after the end day. If the offset changes inside a session
-  // (DST) a boundary can therefore be off by up to one hour.
+  // (DST) a boundary can therefore be off by up to one hour. For a session spanning
+  // more than two days, middle pieces (and all but the last) use the START offset; an offset
+  // change in the middle of such a session is not modelled (only start and end offsets are known).
   // active_s is distributed proportionally to wall-clock overlap with each day
   // (APPROXIMATION: the tracker doesn't record where pauses happened). Integer
   // seconds are kept by cumulative rounding, so pieces always sum to active_s.
@@ -899,6 +904,27 @@ GT.selftest = function () {
     if (prev === null) root.removeAttribute("data-theme"); else root.setAttribute("data-theme", prev);
     return bad.length === 0 || bad.join("; ");
   });
+  test("rest-of-day hatch: a rendered .bar i.rest and legend swatch have a background-image", function () {
+    if (!GT.ui) return "GT.ui missing";
+    var bar = document.createElement("span"); bar.className = "bar"; var seg = GT.ui.restSeg(5); bar.appendChild(seg);
+    var sw = document.createElement("i"); sw.className = "sw rest";
+    document.body.appendChild(bar); document.body.appendChild(sw);
+    var a = getComputedStyle(seg).backgroundImage, b = getComputedStyle(sw).backgroundImage, c = getComputedStyle(seg).backgroundColor;
+    document.body.removeChild(bar); document.body.removeChild(sw);
+    return (a !== "none" && b !== "none" && c !== "rgba(0, 0, 0, 0)") || a + " | " + b + " | " + c;
+  });
+  test("calendar cells: adjacent-month days are labelled with the short month, in-month days with the number", function () {
+    if (!GT.ui) return "GT.ui missing";
+    var a = GT.ui.dayNum("2026-09-28", false), b = GT.ui.dayNum("2026-11-01", false), c = GT.ui.dayNum("2026-10-05", true);
+    return (a === "Sep 28" && b === "Nov 1" && c === "5") || [a, b, c].join(" | ");
+  });
+  test("offsets: spring-forward day shows both; a session crossing midnight into the DST day splits 28 / 29", function () {
+    var sf = A.splitByDay([S("G", "2026-03-29T01:30:00+01:00", "2026-03-29T03:30:00+02:00", 3600)]);
+    var x = A.splitByDay([S("G", "2026-03-28T23:00:00+01:00", "2026-03-29T04:00:00+02:00", 7200)]);
+    var l0 = A.offsetLabel(A.pieceOffsets(sf)), d28 = A.offsetLabel(A.pieceOffsets(x.filter(function (p) { return p.day === "2026-03-28"; })));
+    var d29 = A.offsetLabel(A.pieceOffsets(x.filter(function (p) { return p.day === "2026-03-29"; })));
+    return (l0 === "UTC+01:00/+02:00" && d28 === "UTC+01:00" && d29 === "UTC+01:00/+02:00") || [l0, d28, d29].join(" | ");
+  });
   function cssRulesDeep(list, out) {
     for (var i = 0; i < list.length; i++) { out.push(list[i]); if (list[i].cssRules) cssRulesDeep(list[i].cssRules, out); }
     return out;
@@ -909,18 +935,21 @@ GT.selftest = function () {
     var sup = all.filter(function (r) { return r.conditionText && /not/.test(r.conditionText) && /light-dark/.test(r.conditionText); })[0];
     var fb = sup && Array.prototype.filter.call(sup.cssRules, function (r) { return r.selectorText === ":root"; })[0];
     if (!fb) { T.done(); return "no @supports not (light-dark) fallback block"; }
-    var names = [];
+    var names = [], want = [];
     for (var j = 0; j < fb.style.length; j++) if (fb.style[j].indexOf("--") === 0) names.push(fb.style[j]);
+    // Every token the main :root declares with light-dark() must be restated in the fallback.
+    all.forEach(function (r) {
+      if (r.selectorText !== ":root" || r === fb || r.parentRule) return;
+      for (var m = 0; m < r.style.length; m++) if (r.style[m].indexOf("--") === 0 && r.style.getPropertyValue(r.style[m]).indexOf("light-dark(") >= 0) want.push(r.style[m]);
+    });
+    if (!want.length) bad.push("no light-dark() tokens found in main :root");
     root.setAttribute("data-theme", "light");
     names.forEach(function (n) {
       var a = T.rgbOf(fb.style.getPropertyValue(n).trim()), b = T.rgbOf("var(" + n + ")");
       if (!a || !b) { bad.push(n + " unresolved"); return; }
       if (a.join() !== b.join()) bad.push(n + " differs from light theme");
     });
-    ["--bg", "--panel", "--text", "--text2", "--line", "--axis", "--accent", "--accent-fill", "--onaccent", "--bad", "--good", "--other", "--cfo", "--shadow"].forEach(function (n) {
-      if (names.indexOf(n) < 0) bad.push("missing " + n);
-    });
-    for (var k = 0; k < 8; k++) ["--c", "--cf", "--s", "--sf"].forEach(function (p) { if (names.indexOf(p + k) < 0) bad.push("missing " + p + k); });
+    want.forEach(function (n) { if (names.indexOf(n) < 0) bad.push("missing " + n); });
     var v = function (n) { return T.rgbOf(fb.style.getPropertyValue(n).trim()); };
     var pairs = [["--other", "--cfo"], ["--accent-fill", "--onaccent"], ["--panel", "--text"], ["--panel", "--text2"], ["--panel", "--bad"], ["--panel", "--good"]];
     for (var q = 0; q < 8; q++) { pairs.push(["--c" + q, "--cf" + q]); pairs.push(["--s" + q, "--sf" + q]); }
@@ -1193,6 +1222,12 @@ GT.selftest = function () {
   // ---- Month calendar -----------------------------------------------------
   function dayGames(e) { return Array.from(e.perGame).sort(function (a, b) { return b[1] - a[1] || (a[0] < b[0] ? -1 : 1); }); }
 
+  // Day number shown in a calendar cell; days of the adjacent months carry the short month ("Sep 28").
+  function dayNum(k, inMonth) { return inMonth ? String(+k.slice(8)) : fmtShort(k); }
+  // The hatched "rest of the day" bar segment (games after the day's top 3, lumped together).
+  function restSeg(rest) { var o = el("i", { className: "rest" }); o.style.flexGrow = String(rest); o.style.flexBasis = "0"; return o; }
+  GT.ui = { dayNum: dayNum, restSeg: restSeg };
+
   function dayLabel(k, e, live) {
     var s = fmtDay(k);
     if (!e || e.total_s <= 0) s += ": no play";
@@ -1220,6 +1255,7 @@ GT.selftest = function () {
     var host = $("month"); host.textContent = "";
     var a = state.anchor, mk = a.slice(0, 7);
     $("monthTitle").textContent = MONTHS[+a.slice(5, 7) - 1] + " " + a.slice(0, 4);
+    var anyRest = false;
     var grid = el("div", { className: "cal" });
     grid.setAttribute("role", "group"); grid.setAttribute("aria-label", "Month calendar");
     DOW.forEach(function (d) { grid.appendChild(el("div", { className: "dow", textContent: d })); });
@@ -1231,7 +1267,7 @@ GT.selftest = function () {
         cell.setAttribute("data-day", k);
         cell.setAttribute("aria-label", dayLabel(k, e, live) + (k === state.refDay ? ", today" : ""));
         cell.setAttribute("data-tip", dayTip(k, e, live));
-        cell.appendChild(el("span", { className: "dn", textContent: String(+k.slice(8)) }));
+        cell.appendChild(el("span", { className: "dn", textContent: dayNum(k, k.slice(0, 7) === mk) }));
         cell.appendChild(el("span", { className: "dt", textContent: total > 0 ? A.formatDuration(total) : "" }));
         var bar = el("span", { className: "bar" + (total > 0 ? "" : " empty") });
         if (total > 0) {
@@ -1240,7 +1276,7 @@ GT.selftest = function () {
             if (i < 3) { var seg = el("i"); seg.style.flexGrow = String(g[1]); seg.style.flexBasis = "0"; seg.style.background = colorVar(g[0]); bar.appendChild(seg); }
             else rest += g[1];
           });
-          if (rest > 0) { var o = el("i", { className: "rest" }); o.style.flexGrow = String(rest); o.style.flexBasis = "0"; o.style.background = "var(--other)"; bar.appendChild(o); }
+          if (rest > 0) { bar.appendChild(restSeg(rest)); anyRest = true; }
         }
         cell.appendChild(bar);
         if (live) cell.appendChild(el("span", { className: "ldot" }));
@@ -1259,10 +1295,10 @@ GT.selftest = function () {
     });
     if (games.length > 10) lg.appendChild(el("span", { className: "meta", textContent: "+" + (games.length - 10) + " more (see per-game totals)" }));
     // Grey is used twice, so say so: solid = games ranked 9th+ overall, hatched = the smaller games of that day lumped together.
-    var sw1 = el("i", { className: "sw" }); sw1.style.background = "var(--other)";
-    var sw2 = el("i", { className: "sw rest" }); sw2.style.background = "var(--other)";
-    lg.appendChild(el("span", { className: "lnote" }, [sw1, "Other games (9th+ overall)"]));
-    lg.appendChild(el("span", { className: "lnote" }, [sw2, "Rest of the day (games after the top 3)"]));
+    // Each note appears only when it applies to what is on screen.
+    if (games.some(function (g) { return A.colorSlot(state.rank, g.game) < 0; }))
+      lg.appendChild(el("span", { className: "lnote" }, [el("i", { className: "sw other" }), "Other games (9th+ overall)"]));
+    if (anyRest) lg.appendChild(el("span", { className: "lnote" }, [el("i", { className: "sw rest" }), "Rest of the day (games after the top 3)"]));
   }
 
   // ---- Day timeline -------------------------------------------------------
@@ -1452,7 +1488,7 @@ GT.selftest = function () {
   });
   $("prev").onclick = function () { shiftAnchor(-1); };
   $("next").onclick = function () { shiftAnchor(1); };
-  $("today").onclick = function () { state.anchor = state.refDay; rerender(); };
+  $("today").onclick = function () { state.anchor = state.refDay; state.heatYear = null; rerender(); }; // Today always brings the current week into view
   $("clearFilter").onclick = function () { state.game = null; applyFilter(); rerender(); };
   $("dayClose").onclick = closeDay;
   document.addEventListener("keydown", function (e) {
