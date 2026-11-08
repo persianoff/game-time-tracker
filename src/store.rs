@@ -187,22 +187,26 @@ impl Store {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Sorted `current.*.pending.json` paths.
+    fn pending_files(&self) -> io::Result<Vec<PathBuf>> {
+        let mut v = Vec::new();
+        for entry in fs::read_dir(&self.dir)?.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("current.") && name.ends_with(".pending.json") {
+                v.push(entry.path());
+            }
+        }
+        v.sort();
+        Ok(v)
+    }
+
     /// Read-only: sessions in `current.*.pending.json` files that recovery has
     /// not yet merged into the log. Unreadable files are skipped.
     pub fn load_pending(&self) -> Vec<SessionRecord> {
-        let Ok(rd) = fs::read_dir(&self.dir) else {
+        let Ok(paths) = self.pending_files() else {
             return Vec::new();
         };
-        let mut paths: Vec<PathBuf> = rd
-            .flatten()
-            .filter(|e| {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                n.starts_with("current.") && n.ends_with(".pending.json")
-            })
-            .map(|e| e.path())
-            .collect();
-        paths.sort();
         paths
             .iter()
             .filter_map(|p| serde_json::from_slice(&fs::read(p).ok()?).ok())
@@ -245,24 +249,12 @@ impl Store {
 
         // If the directory listing or the log is unavailable, pending files are
         // skipped but current.json is still protected below.
-        let mut pending = Vec::new();
         let mut listing_ok = true;
-        match fs::read_dir(&self.dir) {
-            Ok(rd) => {
-                for entry in rd.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("current.") && name.ends_with(".pending.json") {
-                        pending.push(entry.path());
-                    }
-                }
-                pending.sort();
-            }
-            Err(e) => {
-                listing_ok = false;
-                out.errors.push(e);
-            }
-        }
+        let pending = self.pending_files().unwrap_or_else(|e| {
+            listing_ok = false;
+            out.errors.push(e);
+            Vec::new()
+        });
         let mut log = match self.load_all_with_stats() {
             Ok((log, _)) => Some(log),
             Err(e) => {
@@ -292,6 +284,40 @@ impl Store {
                 }
             }
             _ => self.protect(&path, &mut out.errors),
+        }
+        out.checkpoint_free = self.checkpoint_slot_free();
+        out
+    }
+
+    /// Retry only `current.*.pending.json` files; `current.json` is never
+    /// read, appended, moved or deleted. For callers that own a live
+    /// checkpoint (an open session): the full [`Store::recover`] would append
+    /// its prefix and delete it. `checkpoint_free` reflects the slot state
+    /// (false while our own checkpoint exists).
+    pub fn recover_pending(&self) -> Recovery {
+        let mut out = Recovery {
+            recovered: Vec::new(),
+            checkpoint_free: false,
+            errors: Vec::new(),
+        };
+        self.remove_orphan_tmp();
+        let pending = self.pending_files().unwrap_or_else(|e| {
+            out.errors.push(e);
+            Vec::new()
+        });
+        if !pending.is_empty() {
+            match self.load_all_with_stats() {
+                Ok((mut log, _)) => {
+                    for p in pending {
+                        match self.recover_file(&p, &mut log) {
+                            Ok(Some(r)) => out.recovered.push(r),
+                            Ok(None) => {}
+                            Err(e) => out.errors.push(e),
+                        }
+                    }
+                }
+                Err(e) => out.errors.push(e),
+            }
         }
         out.checkpoint_free = self.checkpoint_slot_free();
         out
@@ -814,5 +840,38 @@ mod tests {
         let rv = s.recover();
         assert!(rv.checkpoint_free);
         assert!(!tmp_files(&d.0));
+    }
+
+    #[test]
+    fn recover_pending_leaves_live_checkpoint_alone() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let live = rec("Live", 1000, 1030);
+        s.write_checkpoint(&live).unwrap();
+        let rv = s.recover_pending();
+        assert!(rv.recovered.is_empty());
+        assert!(rv.errors.is_empty());
+        assert_eq!(s.load_checkpoint().unwrap(), live);
+        assert!(!d.0.join("gametime.jsonl").exists() || lines(&s) == 0);
+        assert!(!d.0.join("current.json.bad").exists());
+    }
+
+    #[test]
+    fn recover_pending_recovers_pending_files() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let live = rec("Live", 1000, 1030);
+        s.write_checkpoint(&live).unwrap();
+        let old = rec("Old", 5, 50);
+        fs::write(
+            d.0.join("current.123.pending.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        let rv = s.recover_pending();
+        assert_eq!(rv.recovered, vec![old]);
+        assert!(!d.0.join("current.123.pending.json").exists());
+        assert_eq!(s.load_checkpoint().unwrap(), live);
+        assert_eq!(lines(&s), 1);
     }
 }
