@@ -26,6 +26,11 @@ Decisions made during implementation. Where they differ from the original design
 | Rescan | Every 30 min, but only while no session is open or paused. | #23 |
 | Detection depth | Install dirs one level below a drive root are accepted (for example `D:\Fortnite`). Bare library roots (`D:\Games`, `D:\SteamLibrary` and similar) are rejected for auto sources but allowed in `extra_games`. | #21 |
 | Viewer days | Days are computed in the **gaming PC's offset**, which is embedded in each ISO time, never in the browser's time zone. A session crossing midnight is split by wall-clock overlap. | #19 |
+| Viewer colors | Colors are assigned by **all-time rank**: the top 8 games get distinct slots and the rest share "other". Every text/fill pair must reach ≥ 4.5:1 contrast in both themes, enforced by a self-test. | #28 |
+| Viewer browsers | The viewer uses CSS `light-dark()`, so it needs Chrome/Edge 123+, Firefox 120+ or Safari 17.5+ (a fallback is planned in #29). | #28 |
+| Daily aggregation | Rust: `stats::split_by_local_day` with a per-instant offset (DST-aware). Sessions are capped at 7 days, and times beyond year 9999 are ignored. | #25 |
+| Autostart self-heal | Only `gametime-tracker.exe` repairs the Run entry, never `gametime run`, and never when the config failed to load or Task Manager has the entry disabled. | #27 |
+| Auto-export | Payloads are built on the poll thread and written on a short-lived thread, at most one in flight, without fsync. A relative `export_dir` is ignored. `daily.*` moved to #11. | #26 |
 
 ## Step 0: toolchain
 - Install `winget install Rustlang.Rustup`, then `rustup default stable-x86_64-pc-windows-gnu` (see the decisions log).
@@ -141,7 +146,9 @@ Three ways, in order of convenience:
 The last-used source is remembered in `localStorage`.
 
 ### Data contract (shared by tracker and viewer)
-`sessions.json` looks like `{ "version": 1, "generated": "...", "sessions": [ {game, source, start, end, active_s} ] }`. `start` and `end` are ISO-8601 with the local offset. The viewer splits sessions that cross midnight across the two days.
+`sessions.json` looks like `{ "version": 1, "generated": "...", "sessions": [ {game, source, start, end, active_s, open?} ] }`. `start` and `end` are ISO-8601 with the local offset. The viewer splits sessions that cross midnight across the two days.
+- `"open": true` is optional. It marks the in-progress session, and only the tracker's auto-export emits it. CSV, ICS and the CLI export contain closed sessions only.
+- Deduplication: records with the same `game` and `start` are collapsed. The closed record wins over an open one; otherwise the later `end` wins. This applies in both the store (`load_all`) and the viewer.
 
 ### Views
 - **Month calendar (main view).** A 7-column grid with one cell per day:
