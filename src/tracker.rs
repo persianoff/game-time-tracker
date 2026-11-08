@@ -493,7 +493,12 @@ impl Engine {
         {
             self.recover_calls += 1;
         }
-        let rv = self.store.recover();
+        // While our own checkpoint is live, never touch current.json.
+        let rv = if self.ckpt.is_some() {
+            self.store.recover_pending()
+        } else {
+            self.store.recover()
+        };
         for r in &rv.recovered {
             log::log_line(&format!(
                 "recovered session {} start={}",
@@ -1120,6 +1125,37 @@ mod tests {
         assert_eq!(s.load_checkpoint().unwrap().game, "Alpha");
         let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
         assert_eq!(names, vec!["Old"]);
+    }
+
+    #[test]
+    fn retry_with_open_session_keeps_live_checkpoint_and_recovers_pending() {
+        let d = TempDir::new("retrylive");
+        let s = Store::open(&d.0).unwrap();
+        let mut e = engine(&d, true);
+        run_for(&mut e, 1000, 65, || exe(1, ALPHA));
+        let live = s.load_checkpoint().unwrap();
+        assert_eq!(live.game, "Alpha");
+        let old = SessionRecord {
+            game: "Old".into(),
+            source: "gog".into(),
+            exe: "x".into(),
+            start_utc: 5,
+            end_utc: 50,
+            active_s: 45,
+        };
+        fs::write(
+            d.0.join("current.77.pending.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        e.need_recover = true;
+        e.next_recover = 0;
+        run_for(&mut e, 1065, 65, || exe(1, ALPHA));
+        assert!(!d.0.join("current.77.pending.json").exists());
+        let names: Vec<_> = records(&d).iter().map(|r| r.game.clone()).collect();
+        assert_eq!(names, vec!["Old"]); // live prefix not appended
+        assert_eq!(s.load_checkpoint().unwrap().game, "Alpha");
+        assert_eq!(s.load_checkpoint().unwrap().start_utc, live.start_utc);
     }
 
     #[test]

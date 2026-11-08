@@ -297,6 +297,50 @@ impl Store {
         out
     }
 
+    /// Retry only `current.*.pending.json` files; `current.json` is never
+    /// read, appended, moved or deleted. For callers that own a live
+    /// checkpoint (an open session): the full [`Store::recover`] would append
+    /// its prefix and delete it. `checkpoint_free` reflects the slot state
+    /// (false while our own checkpoint exists).
+    pub fn recover_pending(&self) -> Recovery {
+        let mut out = Recovery {
+            recovered: Vec::new(),
+            checkpoint_free: false,
+            errors: Vec::new(),
+        };
+        self.remove_orphan_tmp();
+        let mut pending = Vec::new();
+        match fs::read_dir(&self.dir) {
+            Ok(rd) => {
+                for entry in rd.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("current.") && name.ends_with(".pending.json") {
+                        pending.push(entry.path());
+                    }
+                }
+                pending.sort();
+            }
+            Err(e) => out.errors.push(e),
+        }
+        if !pending.is_empty() {
+            match self.load_all_with_stats() {
+                Ok((mut log, _)) => {
+                    for p in pending {
+                        match self.recover_file(&p, &mut log) {
+                            Ok(Some(r)) => out.recovered.push(r),
+                            Ok(None) => {}
+                            Err(e) => out.errors.push(e),
+                        }
+                    }
+                }
+                Err(e) => out.errors.push(e),
+            }
+        }
+        out.checkpoint_free = self.checkpoint_slot_free();
+        out
+    }
+
     /// Move `current.json` (if present) aside to a pending file.
     fn protect(&self, path: &Path, errors: &mut Vec<io::Error>) {
         if fs::symlink_metadata(path).is_ok() {
@@ -814,5 +858,38 @@ mod tests {
         let rv = s.recover();
         assert!(rv.checkpoint_free);
         assert!(!tmp_files(&d.0));
+    }
+
+    #[test]
+    fn recover_pending_leaves_live_checkpoint_alone() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let live = rec("Live", 1000, 1030);
+        s.write_checkpoint(&live).unwrap();
+        let rv = s.recover_pending();
+        assert!(rv.recovered.is_empty());
+        assert!(rv.errors.is_empty());
+        assert_eq!(s.load_checkpoint().unwrap(), live);
+        assert!(!d.0.join("gametime.jsonl").exists() || lines(&s) == 0);
+        assert!(!d.0.join("current.json.bad").exists());
+    }
+
+    #[test]
+    fn recover_pending_recovers_pending_files() {
+        let d = TempDir::new();
+        let s = Store::open(&d.0).unwrap();
+        let live = rec("Live", 1000, 1030);
+        s.write_checkpoint(&live).unwrap();
+        let old = rec("Old", 5, 50);
+        fs::write(
+            d.0.join("current.123.pending.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        let rv = s.recover_pending();
+        assert_eq!(rv.recovered, vec![old]);
+        assert!(!d.0.join("current.123.pending.json").exists());
+        assert_eq!(s.load_checkpoint().unwrap(), live);
+        assert_eq!(lines(&s), 1);
     }
 }
