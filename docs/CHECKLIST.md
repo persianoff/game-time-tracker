@@ -2,7 +2,7 @@
 
 Run this on the gaming PC with the real launchers installed. Derived from PLAN section Verification. Tick each box and paste the results listed at the end into issue #14.
 
-Setup: unzip the package into a permanent folder, for example `C:\Tools\GameTime\`, and open PowerShell there. Use `.\gametime.exe` below.
+Setup: unzip the package into a permanent folder, for example `C:\Tools\GameTime\` (it contains both exes, `README.md`, this file and `viewer\`). Open PowerShell there and use `.\gametime.exe` below.
 
 ## 1. Detection
 
@@ -16,19 +16,30 @@ Setup: unzip the package into a permanent folder, for example `C:\Tools\GameTime
   - [ ] Xbox / Game Pass
 - [ ] EA sanity: no EA app, Origin, anti-cheat, redistributable or helper entries appear in the list.
 - [ ] No bare library folders (`D:\Games`, `D:\SteamLibrary`, `Program Files\Epic Games`) appear as games.
-- [ ] Missing games are noted (add them via `extra_games` and re-check that they then appear).
-- [ ] Xbox `.GamingRoot` hex dump taken for each drive that has one (`Format-Hex D:\.GamingRoot | Select -First 4`, adjust the drive letter). Paste it in the report. If `log.txt` mentions an unparsed `.GamingRoot`, paste that line too.
+- [ ] Missing games are noted (add them via `extra_games`, restart the tracker, and check that they then appear).
+- [ ] Xbox `.GamingRoot` dump taken for each drive that has one. Capture the **full** dump, not just the first lines, so it can become a test fixture:
+
+  ```powershell
+  Format-Hex D:\.GamingRoot
+  ```
+
+  Adjust the drive letter. If `log.txt` contains a line about an unparsed `.GamingRoot` (first 32 bytes in hex), paste that too.
 
 ## 2. Session timing (stopwatch)
 
-Stop any running tracker first (`.\gametime.exe stop`), then run `.\gametime.exe run --verbose` in a console and keep it open.
+First stop any running tracker: `.\gametime.exe stop`. Then run `.\gametime.exe run --verbose` in a console and keep it open. The log has two kinds of session lines:
 
-- [ ] Start a game and focus it. Log shows a session start. Start the stopwatch.
-- [ ] Alt-tab out for **under 60 s**, then back. Log shows pause then resume, with no new session.
-- [ ] Alt-tab out for **over 60 s**, then back. Log shows the session closed, then a new one started.
-- [ ] Quit the game. Log shows the close.
-- [ ] Session lengths match the stopwatch within a few seconds (alt-tab time not counted).
-- [ ] Ctrl+C the console. The open session is saved.
+- `tracking <game> (<source>)` when a session starts (also printed again when you return after a close).
+- `session closed: <game> <N>s active` when a session closes. There are no pause or resume lines.
+
+Test:
+
+- [ ] Start a game and focus it. A `tracking <game> (...)` line appears. Start the stopwatch.
+- [ ] Alt-tab out for **up to 60 s**, then back. **No** new `tracking` line and no `session closed` line appears; it is still one session.
+- [ ] Alt-tab out for **over 60 s**. About 61 s after you left, `session closed: <game> <N>s active` is printed (while you are still away). `N` is the time in the game before you left. When you return, a new `tracking <game> (...)` line appears.
+- [ ] Quit the game. About 60 s later (the merge gap) `session closed: <game> <N>s active` is printed for the last session.
+- [ ] The `N` values match the stopwatch within a few seconds. Time spent alt-tabbed out is not counted, so for the under-60 s test the final session's `N` equals the total play time minus the alt-tab time.
+- [ ] In a second console, run `.\gametime.exe stop`. The verbose tracker prints `tracker stopped` and exits. If a game was open at that moment, its session is saved (check with `status`). (Ctrl+C is not a clean stop: it kills the process, and the open session is recovered from the checkpoint at the next start, losing up to 30 s.)
 
 ## 3. Status and exports
 
@@ -39,34 +50,44 @@ Stop any running tracker first (`.\gametime.exe stop`), then run `.\gametime.exe
 
 ## 4. Autostart
 
+Start a game first and keep it focused through the `stop` step below, so there is an open session to save.
+
 - [ ] `.\gametime.exe autostart on`: the tracker starts at once (`Get-Process gametime-tracker`), and **Task Manager -> Startup apps** lists GameTime as Enabled.
-- [ ] Log off and log on: `gametime-tracker` is running without any manual action.
-- [ ] Working set after logon, target 2-4 MB (or lower):
+- [ ] Registry check (first byte of the StartupApproved value: even = enabled, odd = disabled; a missing value counts as enabled):
 
   ```powershell
-  Get-Process gametime-tracker | Select-Object Name, @{n='WS_MB';e={[math]::Round($_.WorkingSet64/1MB,2)}}, @{n='PM_MB';e={[math]::Round($_.PagedMemorySize64/1MB,2)}}
+  (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').GameTime
+  (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run').GameTime[0]
   ```
 
-  Also `Get-Process gametime-tracker | Select WS,PM` as raw bytes if you prefer. Check CPU stays near 0 in Task Manager.
-- [ ] Move the folder (exe) elsewhere, run `gametime-tracker.exe` once from the new place, then `.\gametime.exe autostart status`: the Run value points to the new path. Move it back if you prefer.
-- [ ] In Task Manager -> Startup apps, **Disable** GameTime, then `.\gametime.exe stop` and start `gametime-tracker.exe` by hand. It must stay Disabled (not re-enabled).
-- [ ] Re-enable it in Task Manager, then `.\gametime.exe stop`: it prints `stopped`, the process exits, and a session open at that moment is saved (visible in `status`).
-- [ ] `.\gametime.exe autostart off`: the entry is gone from Task Manager and `autostart status`.
-- [ ] Optional: confirm up to 30 s lost at logoff/shutdown mid-game is recovered at next start (accepted limitation).
+  The first prints the quoted path to `gametime-tracker.exe`.
+- [ ] Log off and log on: `gametime-tracker` is running without any manual action.
+- [ ] Working set after logon, target 2-4 MB (or lower), and CPU near 0 in Task Manager:
+
+  ```powershell
+  Get-Process gametime-tracker | Select-Object Name, WS, PM, @{n='WS_MB';e={[math]::Round($_.WorkingSet64/1MB,2)}}, @{n='PM_MB';e={[math]::Round($_.PagedMemorySize64/1MB,2)}}
+  ```
+
+- [ ] Move the exe: `.\gametime.exe stop`, move the whole folder (for example to `C:\Tools\GameTime2`), `cd` into it, run `.\gametime-tracker.exe` once, then `.\gametime.exe autostart status`. It must show `matches: true` and the Run value must point to the new path. Repeat the same sequence to move it back (stop, move, cd, `.\gametime-tracker.exe`, `autostart status`).
+- [ ] Disabled state: in Task Manager -> Startup apps, **Disable** GameTime (the StartupApproved first byte is now odd). Run `.\gametime.exe stop`, then start the tracker with `.\gametime-tracker.exe` (not `autostart on`, which re-enables autostart). It must stay Disabled in Task Manager and `autostart status` should show it as disabled.
+- [ ] Re-enable it in Task Manager. With a game focused, run `.\gametime.exe stop`: it prints `stopped`, the process exits, and the open session is saved (visible in `status`).
+- [ ] `.\gametime.exe autostart off`: the Run value is gone (`autostart status` shows `registered: (none)`) and the entry disappears from Task Manager.
+- [ ] Optional: confirm that up to 30 s lost at logoff or shutdown mid-game is recovered at next start (accepted limitation).
 
 ## 5. Viewer
 
-- [ ] Open `viewer\index.html` locally with `sample-sessions.json`: month, heatmap, totals, day timeline, a session crossing midnight, and dark mode all look right.
-- [ ] Set `"http_port": 8765` in `%APPDATA%\GameTime\config.json`, restart the tracker (`stop`, then `autostart on`).
-- [ ] Add the firewall rule (administrator PowerShell, Private profile):
+- [ ] Open `viewer\index.html` locally and load `viewer\sample-sessions.json`: month, heatmap, totals, day timeline, a session crossing midnight, and dark mode all look right.
+- [ ] Set `"http_port": 8765` in `%APPDATA%\GameTime\config.json`, then `.\gametime.exe stop` and `.\gametime.exe autostart on` (or start `.\gametime-tracker.exe`).
+- [ ] Check `%APPDATA%\GameTime\log.txt` contains `http endpoint listening on 0.0.0.0:8765`. If it says `http endpoint disabled (port 8765): ...`, the port is taken. If it says `config error (...); using defaults`, fix the JSON syntax. As a syntax check, `.\gametime.exe status` refuses to run with a malformed config.
+- [ ] Add the firewall rule (administrator PowerShell, Private profile, local subnet only):
 
   ```powershell
-  New-NetFirewallRule -DisplayName "GameTime viewer" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private
+  New-NetFirewallRule -DisplayName "GameTime viewer" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private -RemoteAddress LocalSubnet
   ```
 
-- [ ] From **another machine** open `http://<game-pc>:8765/`: the viewer loads and the live data matches `gametime status`, including the in-progress session while a game is running.
+- [ ] From **another machine** open `http://<game-pc>:8765/`: the viewer loads and the live data matches `.\gametime.exe status`, including the in-progress session while a game is running.
 - [ ] `http://<game-pc>:8765/sessions.json`, `/daily.json` and `/gametime.ics` all respond.
-- [ ] Optionally `index.html?src=http://<game-pc>:8765/sessions.json` opened from a local file works.
+- [ ] Optionally open `viewer\index.html?src=http://<game-pc>:8765/sessions.json` from a local file on the other machine.
 - [ ] Afterwards, remove the firewall rule if you do not want it (`Remove-NetFirewallRule -DisplayName "GameTime viewer"`) and set `http_port` back to `null`.
 
 ## Report back
@@ -74,10 +95,11 @@ Stop any running tracker first (`.\gametime.exe stop`), then run `.\gametime.exe
 Paste these into issue #14:
 
 1. Windows version and which launchers are installed.
-2. Output of `.\gametime.exe scan` (redact nothing needed), plus a list of games that are missing or wrongly included, and any EA oddities.
-3. The `Format-Hex <drive>:\.GamingRoot | Select -First 4` output for each drive that has the file (or "none"), and any `.GamingRoot` line from `log.txt`.
+2. Output of `.\gametime.exe scan`, plus a list of games that are missing or wrongly included, and any EA oddities.
+3. The full `Format-Hex <drive>:\.GamingRoot` output for each drive that has the file (or "none"), and any `.GamingRoot` line from `log.txt`.
 4. Output of `.\gametime.exe status` after your test session.
-5. Stopwatch results: expected vs. logged minutes for the under-60 s and over-60 s alt-tab tests.
-6. The working-set / private-bytes numbers from the PowerShell command above after logon, and idle CPU.
-7. Pass or fail for each remaining box (ICS import, autostart logoff, moved exe, Task Manager disabled state, `stop`, viewer from another machine), with any error text copied verbatim.
-8. The last 50 lines of `%APPDATA%\GameTime\log.txt` if anything failed.
+5. Stopwatch results: expected vs. logged `N` seconds for the under-60 s and over-60 s alt-tab tests, with the matching `tracking` / `session closed` log lines.
+6. The working-set and private-bytes numbers from the PowerShell command above after logon, and idle CPU.
+7. Output of the two registry commands (Run value and StartupApproved first byte) in the enabled and disabled states.
+8. Pass or fail for each remaining box (ICS import, autostart logoff, moved exe, Task Manager disabled state, `stop`, viewer from another machine), with any error text copied verbatim.
+9. The last 50 lines of `%APPDATA%\GameTime\log.txt` if anything failed.
