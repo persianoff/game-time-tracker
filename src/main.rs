@@ -15,7 +15,16 @@ Commands:
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("scan" | "status" | "export" | "autostart" | "stop") => {
+        Some("stop") => {
+            if gametime::win32::signal_stop(gametime::tracker::STOP_EVENT_NAME) {
+                println!("stopped");
+                ExitCode::SUCCESS
+            } else {
+                println!("tracker not running");
+                ExitCode::FAILURE
+            }
+        }
+        Some("scan" | "status" | "export" | "autostart") => {
             println!("not implemented yet");
             ExitCode::SUCCESS
         }
@@ -24,8 +33,8 @@ fn main() -> ExitCode {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
-            println!("not implemented yet");
-            ExitCode::SUCCESS
+            let verbose = args.len() > 1;
+            ExitCode::from(gametime::tracker::run(verbose) as u8)
         }
         Some("--help" | "-h" | "help") | None => {
             println!("{USAGE}");

@@ -8,7 +8,7 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
-    ERROR_SUCCESS, HANDLE, SYSTEMTIME, WAIT_OBJECT_0,
+    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE, SYSTEMTIME, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::Registry::{
@@ -17,8 +17,8 @@ use windows_sys::Win32::System::Registry::{
     KEY_SET_VALUE, KEY_WOW64_64KEY, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent,
-    WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateEventW, CreateMutexW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, ResetEvent,
+    SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::System::Time::SystemTimeToTzSpecificLocalTime;
 use windows_sys::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath};
@@ -36,43 +36,72 @@ struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
+        // SAFETY: the handle is valid and owned by this wrapper.
         unsafe { CloseHandle(self.0) };
     }
 }
 
 // ---------------------------------------------------------------- foreground
 
-/// Pid and full image path of the foreground window's process.
-pub fn foreground_exe() -> Option<(u32, PathBuf)> {
+/// What the foreground window's process looks like to us.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Foreground {
+    /// No foreground window (lock screen, desktop switch, ...).
+    None,
+    /// The process could not be opened or queried (access denied, protected).
+    Denied(u32),
+    Exe {
+        pid: u32,
+        path: PathBuf,
+    },
+}
+
+/// Foreground window's process: pid and full image path, if obtainable.
+pub fn foreground() -> Foreground {
+    // SAFETY: plain Win32 calls with valid out-pointers; the process handle is
+    // owned by `OwnedHandle` and closed on drop.
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_null() {
-            return None;
+            return Foreground::None;
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, &mut pid);
         if pid == 0 {
-            return None;
+            return Foreground::None;
         }
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if h.is_null() {
-            return None;
+            return Foreground::Denied(pid);
         }
         let h = OwnedHandle(h);
-        let mut cap = 512usize;
-        loop {
+        // Common case: the path fits a stack buffer, no allocation.
+        let mut stack = [0u16; 1024];
+        let mut size = stack.len() as u32;
+        if QueryFullProcessImageNameW(h.0, 0, stack.as_mut_ptr(), &mut size) != 0 {
+            let path = PathBuf::from(OsString::from_wide(&stack[..size as usize]));
+            return Foreground::Exe { pid, path };
+        }
+        let mut cap = 4096usize;
+        while GetLastError() == ERROR_INSUFFICIENT_BUFFER && cap <= 32768 {
             let mut buf = vec![0u16; cap];
             let mut size = cap as u32;
             if QueryFullProcessImageNameW(h.0, 0, buf.as_mut_ptr(), &mut size) != 0 {
                 buf.truncate(size as usize);
-                return Some((pid, PathBuf::from(OsString::from_wide(&buf))));
+                let path = PathBuf::from(OsString::from_wide(&buf));
+                return Foreground::Exe { pid, path };
             }
-            if GetLastError() == ERROR_INSUFFICIENT_BUFFER && cap < 32768 {
-                cap *= 2;
-            } else {
-                return None;
-            }
+            cap *= 2;
         }
+        Foreground::Denied(pid)
+    }
+}
+
+/// Pid and full image path of the foreground window's process.
+pub fn foreground_exe() -> Option<(u32, PathBuf)> {
+    match foreground() {
+        Foreground::Exe { pid, path } => Some((pid, path)),
+        _ => None,
     }
 }
 
@@ -85,6 +114,7 @@ impl SingleInstance {
     /// `None` if another holder already owns the mutex (or creation failed).
     pub fn acquire(name: &str) -> Option<SingleInstance> {
         let n = wide(name);
+        // SAFETY: `n` is a NUL-terminated wide string that outlives the call.
         unsafe {
             let h = CreateMutexW(null(), 0, n.as_ptr());
             if h.is_null() {
@@ -107,25 +137,36 @@ pub struct StopEvent(OwnedHandle);
 impl StopEvent {
     pub fn create(name: &str) -> Option<StopEvent> {
         let n = wide(name);
+        // SAFETY: `n` is a NUL-terminated wide string that outlives the call.
         unsafe {
             let h = CreateEventW(null(), 1, 0, n.as_ptr());
             if h.is_null() {
                 None
             } else {
-                Some(StopEvent(OwnedHandle(h)))
+                let ev = StopEvent(OwnedHandle(h));
+                // A stale signal from a previous owner must not stop us.
+                ResetEvent(ev.0 .0);
+                Some(ev)
             }
         }
     }
 
-    /// Wait up to `timeout_ms`; true if the event was signaled.
+    /// Wait up to `timeout_ms`; true if the event was signaled. If the wait
+    /// itself fails, sleeps for the timeout so callers never spin.
     pub fn wait(&self, timeout_ms: u32) -> bool {
-        unsafe { WaitForSingleObject(self.0 .0, timeout_ms) == WAIT_OBJECT_0 }
+        // SAFETY: the handle is valid for the lifetime of `self`.
+        let rc = unsafe { WaitForSingleObject(self.0 .0, timeout_ms) };
+        if rc == WAIT_FAILED {
+            std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
+        }
+        rc == WAIT_OBJECT_0
     }
 }
 
 /// Signal an existing stop event; false if none exists (tracker not running).
 pub fn signal_stop(name: &str) -> bool {
     let n = wide(name);
+    // SAFETY: `n` is a NUL-terminated wide string that outlives the call.
     unsafe {
         let h = OpenEventW(EVENT_MODIFY_STATE, 0, n.as_ptr());
         if h.is_null() {
@@ -157,6 +198,7 @@ struct RegKey(HKEY);
 
 impl Drop for RegKey {
     fn drop(&mut self) {
+        // SAFETY: the key handle is valid and owned by this wrapper.
         unsafe { RegCloseKey(self.0) };
     }
 }
@@ -168,6 +210,7 @@ fn reg_err(code: u32) -> io::Error {
 fn open_key(hive: Hive, subkey: &str, access: u32) -> Result<RegKey, u32> {
     let s = wide(subkey);
     let mut h: HKEY = null_mut();
+    // SAFETY: `s` is NUL-terminated and `h` a valid out-pointer.
     let rc = unsafe { RegOpenKeyExW(hive.root(), s.as_ptr(), 0, access | KEY_WOW64_64KEY, &mut h) };
     if rc == ERROR_SUCCESS {
         Ok(RegKey(h))
@@ -180,6 +223,7 @@ fn reg_get_raw(hive: Hive, subkey: &str, value: &str, flags: u32) -> Option<Vec<
     let key = open_key(hive, subkey, KEY_READ).ok()?;
     let v = wide(value);
     let mut size = 0u32;
+    // SAFETY: size query only; null data pointer with a valid size out-pointer.
     let mut rc = unsafe {
         RegGetValueW(
             key.0,
@@ -197,6 +241,7 @@ fn reg_get_raw(hive: Hive, subkey: &str, value: &str, flags: u32) -> Option<Vec<
             return None;
         }
         let mut buf = vec![0u8; size as usize];
+        // SAFETY: `buf` is `size` bytes long and outlives the call.
         rc = unsafe {
             RegGetValueW(
                 key.0,
@@ -246,6 +291,7 @@ pub fn reg_subkeys(hive: Hive, subkey: &str) -> Vec<String> {
     loop {
         let mut buf = [0u16; 256]; // key names are at most 255 chars
         let mut len = buf.len() as u32;
+        // SAFETY: `buf` holds `len` u16s; other out-pointers are null (allowed).
         let rc = unsafe {
             RegEnumKeyExW(
                 key.0,
@@ -259,6 +305,9 @@ pub fn reg_subkeys(hive: Hive, subkey: &str) -> Vec<String> {
             )
         };
         if rc != ERROR_SUCCESS {
+            if rc != ERROR_NO_MORE_ITEMS {
+                crate::log::log_line(&format!("reg_subkeys({subkey}): error {rc} at {index}"));
+            }
             break;
         }
         out.push(String::from_utf16_lossy(&buf[..len as usize]));
@@ -271,6 +320,7 @@ pub fn reg_subkeys(hive: Hive, subkey: &str) -> Vec<String> {
 pub fn reg_set_string(hive: Hive, subkey: &str, value: &str, data: &str) -> io::Result<()> {
     let s = wide(subkey);
     let mut h: HKEY = null_mut();
+    // SAFETY: all string pointers are NUL-terminated; `h` is a valid out-pointer.
     let rc = unsafe {
         RegCreateKeyExW(
             hive.root(),
@@ -290,6 +340,7 @@ pub fn reg_set_string(hive: Hive, subkey: &str, value: &str, data: &str) -> io::
     let key = RegKey(h);
     let v = wide(value);
     let d = wide(data);
+    // SAFETY: `d` is a NUL-terminated wide string; the byte length covers it.
     let rc = unsafe {
         RegSetValueExW(
             key.0,
@@ -311,6 +362,7 @@ pub fn reg_set_string(hive: Hive, subkey: &str, value: &str, data: &str) -> io::
 pub fn reg_delete_value(hive: Hive, subkey: &str, value: &str) -> io::Result<()> {
     let key = open_key(hive, subkey, KEY_SET_VALUE).map_err(reg_err)?;
     let v = wide(value);
+    // SAFETY: the key is open and `v` is NUL-terminated.
     let rc = unsafe { RegDeleteValueW(key.0, v.as_ptr()) };
     if rc == ERROR_SUCCESS {
         Ok(())
@@ -323,6 +375,8 @@ pub fn reg_delete_value(hive: Hive, subkey: &str, value: &str) -> io::Result<()>
 
 /// `FOLDERID_RoamingAppData` via the shell, independent of `%APPDATA%`.
 pub fn roaming_appdata() -> Option<PathBuf> {
+    // SAFETY: on success the shell returns a NUL-terminated string that we copy
+    // and then free with CoTaskMemFree.
     unsafe {
         let mut p: *mut u16 = null_mut();
         let hr = SHGetKnownFolderPath(&FOLDERID_RoamingAppData, 0, null_mut(), &mut p);
@@ -388,8 +442,11 @@ fn split_secs(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 pub fn local_offset_secs(utc_secs: u64) -> i32 {
     let secs = utc_secs as i64;
     let (y, m, d, hh, mi, ss) = split_secs(secs);
+    if !(1601..=30827).contains(&y) {
+        return 0; // out of SYSTEMTIME range: no meaningful offset
+    }
     let utc = SYSTEMTIME {
-        wYear: y.clamp(1601, 30827) as u16,
+        wYear: y as u16,
         wMonth: m as u16,
         wDayOfWeek: 0,
         wDay: d as u16,
@@ -399,6 +456,7 @@ pub fn local_offset_secs(utc_secs: u64) -> i32 {
         wMilliseconds: 0,
     };
     let mut local = utc;
+    // SAFETY: both SYSTEMTIME pointers are valid; null zone means the current one.
     if unsafe { SystemTimeToTzSpecificLocalTime(null(), &utc, &mut local) } == 0 {
         return 0;
     }
@@ -546,7 +604,16 @@ mod tests {
 
     #[test]
     fn registry_round_trip() {
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let s = wide(&self.0);
+                // SAFETY: `s` is NUL-terminated.
+                unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, s.as_ptr()) };
+            }
+        }
         let sub = format!("Software\\GameTimeTest-{}", std::process::id());
+        let _cleanup = Cleanup(sub.clone());
         assert!(reg_get_string(Hive::CurrentUser, &sub, "v").is_none());
         reg_set_string(Hive::CurrentUser, &sub, "v", "hello").unwrap();
         assert_eq!(
@@ -563,9 +630,6 @@ mod tests {
         let err = reg_delete_value(Hive::CurrentUser, &sub, "v").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(reg_get_string(Hive::CurrentUser, &sub, "v").is_none());
-        let s = wide(&sub);
-        unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, s.as_ptr()) };
-        assert!(reg_subkeys(Hive::CurrentUser, &sub).is_empty());
     }
 
     #[test]
@@ -576,6 +640,24 @@ mod tests {
 
     #[test]
     fn foreground_does_not_panic() {
+        let _ = foreground();
         let _ = foreground_exe();
+    }
+
+    #[test]
+    fn local_offset_zero_out_of_range() {
+        // Year > 30827 cannot be represented in SYSTEMTIME.
+        assert_eq!(local_offset_secs(u64::MAX / 2), 0);
+    }
+
+    #[test]
+    fn stop_event_create_resets_stale_signal() {
+        let name = format!("Local\\GameTimeStaleTest-{}", std::process::id());
+        let first = StopEvent::create(&name).unwrap();
+        assert!(signal_stop(&name));
+        // Second handle to the same (still signaled) event: create resets it.
+        let second = StopEvent::create(&name).unwrap();
+        assert!(!second.wait(0));
+        drop(first);
     }
 }

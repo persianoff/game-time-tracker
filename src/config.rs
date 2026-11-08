@@ -71,7 +71,7 @@ impl Config {
     pub fn save(&self, dir: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
-        std::fs::write(dir.join(CONFIG_FILE), json)
+        crate::store::write_atomic(&dir.join(CONFIG_FILE), json.as_bytes())
     }
 }
 
