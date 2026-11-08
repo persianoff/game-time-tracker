@@ -14,37 +14,44 @@ pub struct SteamGame {
 }
 
 /// Normalise a Windows path textually: `/` becomes `\`, repeated separators
-/// collapse (a leading `\\` for UNC is kept), and trailing separators are
-/// stripped except for a drive root such as `C:\`.
+/// collapse (a leading `\\` for UNC is kept), `.` segments are dropped, a
+/// `\\?\` verbatim prefix is stripped (`\\?\UNC\srv\x` becomes `\\srv\x`), and
+/// trailing separators are stripped except for a drive root such as `C:\`.
 pub fn normalize_path(p: &Path) -> PathBuf {
     let s = p.to_string_lossy().replace('/', "\\");
-    let unc = s.starts_with("\\\\");
+    let (lead, rest): (&str, &str) = if let Some(r) = s.strip_prefix("\\\\?\\") {
+        match r.get(..4) {
+            Some(u) if u.eq_ignore_ascii_case("UNC\\") => ("\\\\", &r[4..]),
+            _ => ("", r),
+        }
+    } else {
+        let n = s.bytes().take_while(|&b| b == b'\\').count();
+        (
+            match n {
+                0 => "",
+                1 => "\\",
+                _ => "\\\\",
+            },
+            &s[n..],
+        )
+    };
     let mut out = String::with_capacity(s.len());
-    if unc {
+    out.push_str(lead);
+    let mut first = true;
+    for seg in rest.split('\\').filter(|g| !g.is_empty() && *g != ".") {
+        if !first {
+            out.push('\\');
+        }
+        first = false;
+        out.push_str(seg);
+    }
+    let b = out.as_bytes();
+    let is_drive = b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic();
+    if is_drive && rest.ends_with('\\') {
         out.push('\\');
-    }
-    let mut prev_sep = false;
-    for ch in s.chars() {
-        if ch == '\\' {
-            if prev_sep {
-                continue;
-            }
-            prev_sep = true;
-        } else {
-            prev_sep = false;
-        }
-        out.push(ch);
-    }
-    while out.ends_with('\\') {
-        let is_drive_root = out.len() == 3 && out.as_bytes()[1] == b':';
-        if is_drive_root || out.len() <= 2 {
-            break;
-        }
-        out.pop();
     }
     PathBuf::from(out)
 }
-
 fn key_of(p: &Path) -> String {
     p.to_string_lossy().to_lowercase()
 }
@@ -119,7 +126,15 @@ fn game_from_manifest(lib: &Path, text: &str) -> Option<SteamGame> {
     Some(SteamGame {
         appid: appid.to_string(),
         name: name.to_string(),
-        install_dir: normalize_path(&lib.join("steamapps").join("common").join(dir)),
+        install_dir: normalize_path(&{
+            let mut p = lib.join("steamapps").join("common");
+            for c in Path::new(dir).components() {
+                if let Component::Normal(n) = c {
+                    p.push(n);
+                }
+            }
+            p
+        }),
     })
 }
 
