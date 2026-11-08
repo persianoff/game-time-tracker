@@ -31,7 +31,7 @@ Decisions made during implementation. Where they differ from the original design
 | Viewer browsers | The viewer uses CSS `light-dark()`, so it needs Chrome/Edge 123+, Firefox 120+ or Safari 17.5+. Older browsers get a light-only fallback via `@supports not`, with a note when dark mode is requested. | #28, #31 |
 | Daily aggregation | Rust: `stats::split_by_local_day` with a per-instant offset (DST-aware). Sessions are capped at 7 days, and times beyond year 9999 are ignored. | #25 |
 | Autostart self-heal | Only `gametime-tracker.exe` repairs the Run entry, never `gametime run`, and never when the config failed to load or Task Manager has the entry disabled. | #27 |
-| Auto-export | Payloads are built on the poll thread and written on a short-lived thread, at most one in flight, without fsync. A relative `export_dir` is ignored. `daily.*` moved to #11. | #26 |
+| Auto-export | Payloads are built on the poll thread and written on a short-lived thread, at most one in flight, without fsync. A relative `export_dir` is ignored. `daily.*` moved to #11, and auto-export also writes `daily.csv` and `daily.json`. | #26, #33 |
 
 ## Step 0: toolchain
 - Install `winget install Rustlang.Rustup`, then `rustup default stable-x86_64-pc-windows-gnu` (see the decisions log).
@@ -118,6 +118,12 @@ Two binaries come from one crate. The tracker runs with no console window. The C
   - **ICS:** one VEVENT per session, importable into Google or Outlook Calendar.
 - **Auto-export (optional):** when `config.export_dir` is set (for example a OneDrive or network share), the tracker rewrites `sessions.json`, `daily.csv` and `gametime.ics` there every `export_interval_min` (default 15).
 - **HTTP endpoint (optional):** with `config.http_port` set, a std `TcpListener` thread serves `/sessions.json`, `/daily.json` and `/gametime.ics` on the LAN. Off by default.
+  - Implemented in `src/http.rs`: one thread, one request at a time.
+    - **Requests:** GET and HEAD only, otherwise 405; unknown paths get 404. Headers are read to the end, with a 16 KB cap (431 above it) and a 5 s deadline. After writing, the server calls `shutdown(Write)` and drains the connection, so clients never get a reset.
+    - **Responses:** every response carries `Access-Control-Allow-Origin: *`, `Cache-Control: no-store` and `Connection: close`.
+    - **Data:** each request builds only the format it asked for, then the working set is trimmed. The open session comes from a live snapshot, published on session start or switch and refreshed at checkpoints. It is cleared only after the append succeeds.
+    - `/daily.json` is `{version:1, generated, days:[{date, game, minutes}]}`, with minutes rounded to 0.1 *after* aggregation and rows that round to 0 omitted. `daily.csv` uses `date,game,minutes`, a BOM and CRLF.
+  - **Exposure:** it binds `0.0.0.0` with no authentication, so it is meant for a trusted LAN only. The user must allow the port in Windows Firewall; the app never adds rules. `http_port: 0` is rejected.
 
 ### Autostart (autostart.rs)
 - **Mechanism:** the per-user Run key `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `GameTime` = `"<full path>\gametime-tracker.exe"`. It starts at every logon, needs no admin rights, and shows up in Task Manager's Startup tab, so the user can see and control it.
