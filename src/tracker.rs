@@ -101,6 +101,8 @@ pub struct Engine {
     export_join_wait_ms: u64,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
+    /// Open-session snapshot for the HTTP endpoint (refreshed at checkpoint time).
+    live: crate::http::Live,
     #[cfg(test)]
     match_calls: u32,
     #[cfg(test)]
@@ -151,6 +153,7 @@ impl Engine {
             export_slow_logged: false,
             export_join_wait_ms: EXPORT_JOIN_WAIT_MS,
             last_seen: 0,
+            live: crate::http::new_live(),
             #[cfg(test)]
             match_calls: 0,
             #[cfg(test)]
@@ -223,6 +226,19 @@ impl Engine {
         // Last, so a slow scan never delays a poll's clock reading.
         self.maybe_rescan(now);
         self.maybe_export(now);
+    }
+
+    /// Handle to the open-session snapshot shared with the HTTP thread.
+    pub fn live(&self) -> crate::http::Live {
+        self.live.clone()
+    }
+
+    /// Publish the open session (or `None`) for the HTTP endpoint. A no-op
+    /// unless `http_port` is set. The lock is held only for the swap.
+    fn publish_live(&self, rec: Option<SessionRecord>) {
+        if self.cfg.http_port.is_some() {
+            *self.live.lock().unwrap_or_else(|e| e.into_inner()) = rec;
+        }
     }
 
     /// Close the open session (stop/shutdown) and make a last attempt at any
@@ -341,7 +357,15 @@ impl Engine {
             .current()
             .map(|s| self.record(&s, String::new()));
         let payload = match export::build_payload(&self.store, open.as_ref(), now) {
-            Ok(p) => p,
+            Ok(p) => {
+                if p.dropped > 0 {
+                    log::log_line(&format!(
+                        "warning: {} record(s) with invalid times left out of daily totals",
+                        p.dropped
+                    ));
+                }
+                p
+            }
             Err(e) => {
                 self.export_done(Err(e), now);
                 return;
@@ -375,6 +399,7 @@ impl Engine {
 
     fn commit(&mut self, sess: Session<GameKey>, exe: String, now: u64) {
         self.export_dirty = true;
+        self.publish_live(None);
         let rec = self.record(&sess, exe);
         let owns = self.slot_ok
             && matches!(&self.ckpt, Some((g, st)) if *g == sess.game && *st == sess.start);
@@ -530,6 +555,14 @@ impl Engine {
         }
         self.last_ckpt = Some(now);
 
+        if self.cfg.http_port.is_some() {
+            let rec = self
+                .tracker
+                .current()
+                .map(|s| self.record(&s, String::new()));
+            self.publish_live(rec);
+        }
+
         if !self.slot_ok {
             self.slot_ok = self.store.checkpoint_slot_free();
         }
@@ -644,7 +677,14 @@ pub fn run(verbose: bool, heal_autostart: bool) -> i32 {
     ));
 
     win32::trim_working_set();
+    let http_port = cfg.http_port;
     let mut engine = Engine::new(cfg, db, detect::scan_system, store, rv.checkpoint_free);
+    if let Some(port) = http_port {
+        match Store::open(&dir).and_then(|s| crate::http::spawn(port, s, engine.live())) {
+            Ok(()) => log::log_line(&format!("http endpoint listening on 0.0.0.0:{port}")),
+            Err(e) => log::log_line(&format!("http endpoint disabled (port {port}): {e}")),
+        }
+    }
     engine.need_recover = !rv.errors.is_empty();
     while !stop.wait(1000) {
         engine.tick(win32::now_utc_secs(), win32::foreground());
@@ -1077,6 +1117,30 @@ mod tests {
         run_for(&mut e, 1031, 120, || Foreground::None);
         assert!(!d.0.join("current.json").exists());
         assert_eq!(records(&d).len(), 1);
+    }
+
+    #[test]
+    fn live_snapshot_follows_open_session_when_http_enabled() {
+        let d = TempDir::new("live");
+        let cfg = Config {
+            http_port: Some(1),
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        let live = e.live();
+        run_for(&mut e, 1000, 29, || exe(1, ALPHA));
+        assert!(live.lock().unwrap().is_none());
+        run_for(&mut e, 1029, 2, || exe(1, ALPHA));
+        assert_eq!(live.lock().unwrap().as_ref().unwrap().game, "Alpha");
+        run_for(&mut e, 1031, 120, || Foreground::None);
+        assert!(live.lock().unwrap().is_none());
+
+        // Disabled: never published.
+        let d2 = TempDir::new("live-off");
+        let mut e2 = engine(&d2, true);
+        run_for(&mut e2, 1000, 40, || exe(1, ALPHA));
+        assert!(e2.live().lock().unwrap().is_none());
     }
 
     #[test]

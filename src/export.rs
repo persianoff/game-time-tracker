@@ -21,11 +21,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::stats;
 use crate::store::{self, SessionRecord, Store};
 use crate::win32;
 
 pub const SESSIONS_JSON: &str = "sessions.json";
 pub const CALENDAR_ICS: &str = "gametime.ics";
+pub const DAILY_CSV: &str = "daily.csv";
+pub const DAILY_JSON: &str = "daily.json";
 
 // ------------------------------------------------------------------- formatting
 
@@ -106,6 +109,64 @@ pub fn to_csv(sessions: &[SessionRecord]) -> Vec<u8> {
             r.active_s as f64 / 60.0,
             r.active_s
         ));
+    }
+    s.into_bytes()
+}
+
+// ------------------------------------------------------------ daily aggregate
+
+/// Minutes (one decimal) from aggregated seconds. Always converted after the
+/// per-(day, game) sum, never per session piece.
+fn daily_minutes(secs: u64) -> f64 {
+    (secs as f64 / 6.0).round() / 10.0
+}
+
+fn date_str((y, m, d): stats::Date) -> String {
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+#[derive(Serialize)]
+struct DailyRow<'a> {
+    date: String,
+    game: &'a str,
+    minutes: f64,
+}
+
+#[derive(Serialize)]
+struct DailyDoc<'a> {
+    version: u32,
+    generated: String,
+    days: Vec<DailyRow<'a>>,
+}
+
+/// `daily.json`: `{ "version": 1, "generated": <ISO local>, "days": [ {date
+/// "YYYY-MM-DD" (local), game, minutes} ] }`, sorted by date then game.
+pub fn to_daily_json(daily: &stats::Daily, now: u64) -> String {
+    let doc = DailyDoc {
+        version: 1,
+        generated: win32::format_iso_local(now),
+        days: daily
+            .iter()
+            .map(|((d, g), s)| DailyRow {
+                date: date_str(*d),
+                game: g,
+                minutes: daily_minutes(*s),
+            })
+            .collect(),
+    };
+    let mut s = serde_json::to_string_pretty(&doc).unwrap_or_default();
+    s.push('\n');
+    s
+}
+
+/// `daily.csv`: BOM, header `date,game,minutes`, CRLF rows.
+pub fn to_daily_csv(daily: &stats::Daily) -> Vec<u8> {
+    let mut s = String::from("\u{feff}date,game,minutes\r\n");
+    for ((d, g), secs) in daily {
+        s.push_str(&date_str(*d));
+        s.push(',');
+        csv_field(&mut s, g);
+        s.push_str(&format!(",{:.1}\r\n", daily_minutes(*secs)));
     }
     s.into_bytes()
 }
@@ -222,29 +283,46 @@ pub fn to_ics(sessions: &[SessionRecord], now: u64) -> String {
 
 // ----------------------------------------------------------------- auto-export
 
-/// The bytes of both auto-export files, built on the poll thread so that the
+/// The bytes of the auto-export files, built on the poll thread so that the
 /// (possibly slow) disk writes can happen elsewhere.
 pub struct Payload {
     pub json: Vec<u8>,
     pub ics: Vec<u8>,
+    pub daily_csv: Vec<u8>,
+    pub daily_json: Vec<u8>,
+    /// Records skipped (invalid times) by the daily aggregation.
+    pub dropped: usize,
 }
 
 /// Load the closed sessions and format `sessions.json` (with the open session,
-/// if any) and `gametime.ics`.
+/// if any), `gametime.ics`, `daily.csv` and `daily.json`. An open session that
+/// is already in the log (same game and start) is not added twice.
 pub fn build_payload(store: &Store, open: Option<&SessionRecord>, now: u64) -> io::Result<Payload> {
     let closed = store.load_all()?;
+    let open = open.filter(|o| {
+        !closed
+            .iter()
+            .any(|c| c.game == o.game && c.start_utc == o.start_utc)
+    });
+    let (daily, dropped) =
+        stats::daily_checked(closed.iter().chain(open), win32::local_offset_secs);
     Ok(Payload {
         json: to_json(&closed, open, now).into_bytes(),
         ics: to_ics(&closed, now).into_bytes(),
+        daily_csv: to_daily_csv(&daily),
+        daily_json: to_daily_json(&daily, now).into_bytes(),
+        dropped,
     })
 }
 
-/// Write both files into `dir`, creating it if needed. No fsync: the files are
+/// Write the files into `dir`, creating it if needed. No fsync: the files are
 /// derived data and `dir` may be a slow network share.
 pub fn write_payload(dir: &Path, p: &Payload) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     store::write_atomic_nosync(&dir.join(SESSIONS_JSON), &p.json)?;
-    store::write_atomic_nosync(&dir.join(CALENDAR_ICS), &p.ics)
+    store::write_atomic_nosync(&dir.join(CALENDAR_ICS), &p.ics)?;
+    store::write_atomic_nosync(&dir.join(DAILY_CSV), &p.daily_csv)?;
+    store::write_atomic_nosync(&dir.join(DAILY_JSON), &p.daily_json)
 }
 
 // ------------------------------------------------------------------------ CLI
@@ -416,6 +494,28 @@ mod tests {
 
     // 2026-01-02 03:04:05 UTC
     const T: u64 = 1_767_323_045;
+
+    #[test]
+    fn daily_formats() {
+        let mut d = stats::Daily::new();
+        d.insert(((2026, 1, 2), "A, B".into()), 90); // 1.5 min
+        d.insert(((2026, 1, 2), "C".into()), 60); // 1.0
+        d.insert(((2026, 1, 10), "C".into()), 7); // 0.1
+        let csv = String::from_utf8(to_daily_csv(&d)).unwrap();
+        assert_eq!(
+            csv,
+            "\u{feff}date,game,minutes\r\n2026-01-02,\"A, B\",1.5\r\n2026-01-02,C,1.0\r\n2026-01-10,C,0.1\r\n"
+        );
+        let v: serde_json::Value = serde_json::from_str(&to_daily_json(&d, T)).unwrap();
+        assert_eq!(v["version"], 1);
+        assert!(v["generated"].is_string());
+        let days = v["days"].as_array().unwrap();
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[0]["date"], "2026-01-02");
+        assert_eq!(days[0]["game"], "A, B");
+        assert_eq!(days[0]["minutes"], 1.5);
+        assert_eq!(days[2]["minutes"], 0.1);
+    }
 
     #[test]
     fn json_shape_order_and_open_flag() {
