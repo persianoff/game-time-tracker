@@ -1502,6 +1502,9 @@ GT.selftest = function () {
     var f = document.createElement("iframe");
     f.style.cssText = "position:absolute;left:-9999px;top:0;width:360px;height:1400px;border:0";
     var html = document.documentElement.outerHTML.replace("<head>", "<head><script>window.__GT_NOSTART=1<\/script>");
+    var finished = false, timer;
+    function finish(r) { if (finished) return; finished = true; clearTimeout(timer); if (f.parentNode) f.parentNode.removeChild(f); done(r); }
+    timer = setTimeout(function () { finish("iframe did not load"); }, 5000);
     f.onload = function () {
       var out = true;
       try {
@@ -1521,19 +1524,18 @@ GT.selftest = function () {
         var bad = [];
         steps.forEach(function (st) {
           st[1]();
-          var sw = d.documentElement.scrollWidth, iw = w.innerWidth;
+          var sw = d.documentElement.scrollWidth, cw = d.documentElement.clientWidth, iw = w.innerWidth; // clientWidth excludes a classic scrollbar, which would hide small overflows
           if (iw !== 360) bad.push(st[0] + ": iframe is " + iw + "px wide, not 360");
-          else if (sw > iw) {
+          else if (sw > cw) {
             var who = []; d.querySelectorAll("body *").forEach(function (e) {
-              if (!e.closest(".scroll") && e.getBoundingClientRect().right > iw + 0.5) who.push(e.tagName.toLowerCase() + "." + e.className);
+              if (!e.closest(".scroll") && e.getBoundingClientRect().right > cw + 0.5) who.push(e.tagName.toLowerCase() + "." + e.className);
             });
-            bad.push(st[0] + ": scrollWidth " + sw + " > " + iw + " (" + who.slice(0, 3).join(", ") + ")");
+            bad.push(st[0] + ": scrollWidth " + sw + " > " + cw + " (" + who.slice(0, 3).join(", ") + ")");
           }
         });
         out = bad.length === 0 || bad.join("; ");
       } catch (e) { out = "exception: " + e.message; }
-      document.body.removeChild(f);
-      done(out);
+      finish(out);
     };
     f.srcdoc = html;
     document.body.appendChild(f);
