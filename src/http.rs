@@ -12,7 +12,8 @@
 //! - `/gametime.ics`: calendar
 //!
 //! Data is built from the store at request time. The open session comes from a
-//! [`Live`] snapshot that the poll thread refreshes at checkpoint time; the lock
+//! [`Live`] snapshot that the poll thread refreshes when a session starts or
+//! switches and at checkpoints; the lock
 //! is held only to clone it, and the poll thread never waits on this thread.
 //!
 //! The Windows Firewall is not touched: the user must allow the port.

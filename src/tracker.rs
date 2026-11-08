@@ -101,10 +101,10 @@ pub struct Engine {
     export_join_wait_ms: u64,
     /// Time of the latest tick (used by `shutdown`).
     last_seen: u64,
-    /// Open-session snapshot for the HTTP endpoint (refreshed at checkpoint time).
+    /// Open-session snapshot for the HTTP endpoint (refreshed on session start, on switch and at checkpoints).
     live: crate::http::Live,
     /// Start of the session currently published in `live`.
-    live_start: Option<u64>,
+    live_key: Option<(String, u64)>,
     /// Dropped-record count last logged (warn only on change).
     dropped_logged: usize,
     #[cfg(test)]
@@ -158,7 +158,7 @@ impl Engine {
             export_join_wait_ms: EXPORT_JOIN_WAIT_MS,
             last_seen: 0,
             live: crate::http::new_live(),
-            live_start: None,
+            live_key: None,
             dropped_logged: 0,
             #[cfg(test)]
             match_calls: 0,
@@ -244,7 +244,7 @@ impl Engine {
     /// unless `http_port` is set. The lock is held only for the swap.
     fn publish_live(&mut self, rec: Option<SessionRecord>) {
         if self.cfg.http_port.is_some() {
-            self.live_start = rec.as_ref().map(|r| r.start_utc);
+            self.live_key = rec.as_ref().map(|r| (r.game.clone(), r.start_utc));
             *self.live.lock().unwrap_or_else(|e| e.into_inner()) = rec;
         }
     }
@@ -256,16 +256,22 @@ impl Engine {
         if self.cfg.http_port.is_none() {
             return;
         }
-        match self.tracker.current_start() {
-            Some(st) if Some(st) != self.live_start => {
-                let rec = self
-                    .tracker
-                    .current()
-                    .map(|s| self.record(&s, String::new()));
-                self.publish_live(rec);
-            }
-            None if self.live_start.is_some() && self.retry.is_empty() => self.publish_live(None),
-            _ => {}
+        let changed = match (self.tracker.current_key(), &self.live_key) {
+            (Some((g, st)), Some((lg, ls))) => g.name != *lg || st != *ls,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if changed {
+            let rec = self
+                .tracker
+                .current()
+                .map(|s| self.record(&s, String::new()));
+            self.publish_live(rec);
+        } else if self.tracker.current_key().is_none()
+            && self.live_key.is_some()
+            && self.retry.is_empty()
+        {
+            self.publish_live(None);
         }
     }
 
@@ -593,11 +599,11 @@ impl Engine {
         self.last_ckpt = Some(now);
 
         if self.cfg.http_port.is_some() {
-            let rec = self
-                .tracker
-                .current()
-                .map(|s| self.record(&s, String::new()));
-            self.publish_live(rec);
+            // Refresh the open session's totals; never clears (see `sync_live`).
+            if let Some(s) = self.tracker.current() {
+                let rec = self.record(&s, String::new());
+                self.publish_live(Some(rec));
+            }
         }
 
         if !self.slot_ok {
@@ -1587,6 +1593,31 @@ mod tests {
         run_for(&mut e, 1080, 15, || Foreground::None);
         assert!(e.retry.is_empty());
         assert_eq!(records(&d).len(), 1);
+    }
+
+    #[test]
+    fn live_snapshot_stays_while_append_pending() {
+        let d = TempDir::new("live-pending");
+        let cfg = Config {
+            http_port: Some(1),
+            ..Config::default()
+        };
+        let db = scan_fake(&cfg);
+        let mut e = Engine::new(cfg, db, scan_fake, Store::open(&d.0).unwrap(), true);
+        let live = e.live();
+        fs::create_dir(d.0.join("sessions.jsonl")).unwrap();
+        run_for(&mut e, 1000, 10, || exe(1, ALPHA));
+        // Closes at ~1070; append fails and is queued. Run across a checkpoint.
+        run_for(&mut e, 1010, 70, || Foreground::None);
+        assert_eq!(e.retry.len(), 1);
+        run_for(&mut e, 1080, 40, || Foreground::None);
+        assert!(!e.retry.is_empty());
+        assert_eq!(live.lock().unwrap().as_ref().unwrap().game, "Alpha");
+        // Append recovers: the snapshot clears.
+        fs::remove_dir(d.0.join("sessions.jsonl")).unwrap();
+        run_for(&mut e, 1120, 20, || Foreground::None);
+        assert!(e.retry.is_empty());
+        assert!(live.lock().unwrap().is_none());
     }
 
     #[test]
